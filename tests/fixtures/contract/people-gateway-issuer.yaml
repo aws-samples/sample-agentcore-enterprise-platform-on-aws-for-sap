@@ -1,0 +1,16 @@
+# Parity fixture: the people Gateway trusting an organisation's own OpenID Connect
+# issuer instead of Cognito remote clients. check-contract.sh synthesizes this like a
+# preset. Every value is a placeholder.
+project: agentcore-workshop
+environment: dev
+
+gateway:
+  people:
+    enabled: true
+    issuer:
+      discovery_url: https://idp.example.com/.well-known/openid-configuration
+      clients: [example-client-id]
+      audience: gateway
+      groups:
+        from: claim
+        claim: groups

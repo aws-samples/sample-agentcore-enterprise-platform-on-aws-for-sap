@@ -1,0 +1,30 @@
+# Parity fixture: the hello-sap reference use case on the SAP layer, with one sandbox
+# system, Cedar and the layer's interceptor check, so check-contract.sh proves a use case
+# on a layer synthesizes. The platform tests use it as their use case with a Gateway
+# client and Cedar policies (use-cases/hello-sap/walkthrough.md).
+project: agentcore-workshop
+environment: dev
+
+gateway:
+  interceptor_extensions:
+    - path: layers/sap/sap_check
+      target_prefixes: [sap-]
+      request_headers: true
+
+security:
+  cedar:
+    enabled: true
+
+layers:
+  sap:
+    systems:
+      s4:
+        system_role: sandbox
+        base_url: https://sap.example.com/sap/opu/odata/sap/
+        client: "100"
+        secret_name: sap/s4
+    access:
+      hello-sap: {read: "*"}
+
+use_cases:
+  hello-sap: {}

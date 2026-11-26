@@ -1,0 +1,800 @@
+# ASH suppressions for this use case's own files and stack templates. The rule for a
+# suppression is the root .ash.yaml's; scripts/check-security.sh merges this file in.
+global_settings:
+  suppressions:
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations.py
+    reason: 'Test of the quickstart''s scripted steps: SAP_SECRET_NAME is the Secrets Manager NAME placeholder
+      ("lab/sap/s4") the page''s script substitutes; no value, and nothing is deployed.'
+    expiration: '2027-11-01'
+  - rule_id: yaml.openapi.security.use-of-basic-authentication.use-of-basic-authentication
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_MATERIAL_DOCUMENT_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: yaml.openapi.security.use-of-basic-authentication.use-of-basic-authentication
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_PURCHASEORDER_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: yaml.openapi.security.use-of-basic-authentication.use-of-basic-authentication
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_SUPPLIERINVOICE_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_3
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_MATERIAL_DOCUMENT_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_3
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_PURCHASEORDER_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_3
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_SUPPLIERINVOICE_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_4
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_MATERIAL_DOCUMENT_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_4
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_PURCHASEORDER_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_4
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_SUPPLIERINVOICE_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_5
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_PURCHASEORDER_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_21
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_MATERIAL_DOCUMENT_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_21
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_PURCHASEORDER_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_21
+    path: use-cases/business-operations/packs/_seed/api-docs/EXAMPLE_API_SUPPLIERINVOICE_PROCESS_SRV.yaml
+    reason: 'Illustrative summary of an S/4HANA OData service, written for this sample (its info.description
+      says so), describing how SAP''s gateway behaves: SAP authenticates a technical user with Basic over
+      TLS and applies schemes per operation. Nothing in this repo serves a route from it or authenticates
+      against it; knowledge.py only uploads it as seed text for the api-docs knowledge base. Editing it
+      to satisfy the rule would make it describe SAP wrongly. A finding in use-cases/business-operations/openapi.yaml,
+      our own contract, is a different matter.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_5
+    path: use-cases/business-operations/openapi.yaml
+    reason: 'One operation declares `security: []` and means it (test_only_the_push_route_opts_out_of_the_authorizer
+      pins it). POST /erp-events is called by a SAP SM59 destination that holds no Cognito session; it
+      is not unauthenticated: pipeline/erp_events.py checks a shared token with hmac.compare_digest and
+      refuses everything while the secret is empty, the method is throttled to 50 RPS, and the body is
+      capped at 1 MB. Declaring an authorizer it does not have is the inaccuracy the rule asks for.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_OPENAPI_21
+    path: use-cases/business-operations/openapi.yaml
+    reason: 'Every array a client can send is capped: SapEventEnvelope.records (maxItems 100) and the
+      create spec''s process_types (50) and attributes (100), each enforced server-side as well, and test_every_request_side_array_in_the_contract_is_capped
+      fails if a request-side array without maxItems appears. Checkov reports this rule once per file,
+      at the first uncapped array, which is now a response the API produces (GET /cases items, paged by
+      next_token with a bounded limit). An unbounded client-posted list is the rule''s threat; a response
+      array is not.'
+    expiration: '2027-11-01'
+  - rule_id: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+    path: use-cases/business-operations/verify.py
+    reason: Operator CLI. The URL is an https:// f-string literal naming this deployment's Cognito domain,
+      built from the project/env config and the caller's own STS account id; no untrusted input reaches
+      it.
+    expiration: '2027-11-01'
+  - rule_id: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+    path: use-cases/business-operations/ops.py
+    reason: Operator CLI (`remote-client-config issuer`). The URL is the issuer's OIDC discovery document,
+      read from this deployment's own SSM parameter, which the stack writes from gateway.people.issuer
+      in platform.yaml; the line above refuses anything not starting with https://, so no file:// URL
+      can reach urlopen.
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations_api_config.py
+    reason: 'Unit test: secret_name holds the stub Secrets Manager NAME business-operations/sap/prd for a
+      synthesized production SAP system; no value, nothing is deployed.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations_mcp_clients.py
+    reason: 'Unit test: "s3cr3t" is the ClientSecret a SimpleNamespace stand-in for Cognito returns, so
+      the test can assert it is never printed; no real user pool is called.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations_removal.py
+    reason: 'Unit test: secret_name holds the Secrets Manager NAME placeholder sap/s4 in an in-memory
+      config that is only synthesized; no value.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations_run_checks.py
+    reason: 'Unit test: secret="wrong" is a deliberately mismatched run-grant value the check must refuse;
+      a fixture string against stubbed lookups, not a credential.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: use-cases/business-operations/frontend/src/mocks/fixtures.ts
+    reason: 'Mock data for the console''s offline mode: the string is the RFC 4648 lowercase base32 alphabet
+      (a-z, 2-7) fakeCaseId draws characters from to shape a fake case id; no credential.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/fixtures/contract/business-operations-production.yaml
+    reason: 'Contract fixture: client_secret_name and the SAP system''s secret_name hold Secrets Manager
+      NAMES (agentcore/idp-client-secret, business-operations/sap/s4); no value.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations_api.py
+    reason: 'Unit test: secret_name/secret hold stub Secrets Manager NAMES for a SAP or Graph config block
+      (e.g. x/sap/s4) against a stubbed or absent AWS; no value, nothing authenticates.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations_pipeline.py
+    reason: 'Unit test: secret_name/secret hold stub Secrets Manager NAMES for a SAP or Graph config block
+      (e.g. x/sap/s4) against a stubbed or absent AWS; no value, nothing authenticates.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations_test_data.py
+    reason: 'Unit test: secret_name/secret hold stub Secrets Manager NAMES for a SAP or Graph config block
+      (e.g. x/sap/s4) against a stubbed or absent AWS; no value, nothing authenticates.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-AWS-ACCESS-KEY
+    path: use-cases/business-operations/tests/test_business_operations_notifications.py
+    reason: 'Unit test: the AKIA...EXAMPLE string is the example access key id AWS publishes in its documentation,
+      used here as a hostile string the case-reference stamping must not let through. It is not a key.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: use-cases/business-operations/tests/test_business_operations_api_layer.py
+    reason: 'Unit test: the string is the expected canonical case key (pack id and SAP key fields joined
+      by \x1f), the digest INPUT of a derived case_id; it reads as entropy and is plain business identifiers.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+    path: use-cases/business-operations/tests/test_business_operations_agent_evidence.py
+    reason: 'Unit test: the hex string is the `transactionid` of a fabricated SAP OData error payload,
+      a correlation id SAP prints in every error; no credential.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/fixtures/contract/business-operations-direct.yaml
+    reason: 'Contract fixture: client_secret_name, delegating_secret_name and the SAP systems'' secret_name
+      hold Secrets Manager NAMES (agentcore/idp-client-secret, business-operations/entra/*, business-operations/sap/*);
+      no value.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: use-cases/business-operations/tests/test_business_operations_agent_run_channel.py
+    reason: 'Unit test: the string is a fabricated case id (the pack''s short id, a hyphen and 26 base32
+      characters of a digest), which the run channel and its subscribe check scope by; an identifier,
+      not a credential.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: use-cases/business-operations/tests/test_business_operations_run_events_auth.py
+    reason: 'Unit test: the string is a fabricated case id (the pack''s short id, a hyphen and 26 base32
+      characters of a digest), which the run channel and its subscribe check scope by; an identifier,
+      not a credential.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+    path: use-cases/business-operations/frontend/src/components/case/CaseTimeline.test.tsx
+    reason: 'Unit test: approved_write is a fabricated SHA-256 digest of an approved SAP write, the shape
+      the action log records so the timeline can show which write a human approved; a digest of test data,
+      not a credential.'
+    expiration: '2027-11-01'
+  - rule_id: python.lang.security.audit.non-literal-import.non-literal-import
+    path: use-cases/business-operations/ops.py
+    reason: Operator CLI. _evals imports a module named by the VERBS table, whose only callers pass the
+      literals setup_evaluations and run_regression, from the use case's own evals/ directory; no argument
+      or input names the module.
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/quickstart.platform.yaml
+    reason: 'Quickstart config: secret_name holds the Secrets Manager NAME the quickstart creates with
+      `deploy.sh layer run sap secrets`; the value never goes in this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/platform.example.yaml
+    reason: 'Example config: secret_name holds the Secrets Manager NAME an operator creates with `deploy.sh
+      layer run sap secrets`; the value never goes in this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/business-operations/tests/test_business_operations_ingest.py
+    reason: 'Unit test: `SECRETKEY42` is a canary the test asserts never reaches the log, and secret_name
+      holds a stub Secrets Manager NAME for a SAP system; neither is a credential.'
+    expiration: '2027-11-01'
+  - rule_id: B608
+    path: use-cases/business-operations/api/layer/python/sap_odata.py
+    reason: 'ABAP SQL for ADT''s read-only data preview (freestyle SELECT). Both interpolated values are
+      checked against their SAP domains first: the company code against ^[A-Z0-9]{4}$ and the posting
+      period variant SAP returns against ^[A-Z0-9]{1,4}$; layers/sap/tests/test_sap_layer.py pins both
+      refusals.'
+    expiration: '2027-11-01'
+  - rule_id: B608
+    path: use-cases/business-operations/stack.py
+    reason: 'Not a query: the string is the case-management tool''s description for the agent ("fields
+      to update ... status is one of ..."), which bandit''s update...set pattern matches as prose.'
+    expiration: '2027-11-01'
+  - rule_id: B505
+    path: use-cases/business-operations/tests/test_business_operations_direct_mode.py
+    reason: 'Unit test: the 1024-bit RSA key is generated on purpose to prove the direct-mode authorizer
+      refuses a key shorter than 2048 bits (test_a_key_shorter_than_2048_bits_is_refused); it signs only
+      a test token.'
+    expiration: '2027-11-01'
+  - rule_id: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
+    path: use-cases/business-operations/frontend/src/routes/WorkspacePage.test.tsx
+    reason: 'Unit test: the RegExp is built from a fixture case''s headline to find its row in the rendered
+      list; no user input, and vitest is the only caller.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_111
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'CDK''s own provider roles: the LogRetention singleton (logs:PutRetentionPolicy and DeleteRetentionPolicy
+      on *) and BucketDeployment (cloudfront:CreateInvalidation on *; its S3 writes are scoped to its
+      destination bucket). Neither action reads or changes data, and the constructs take no resource scope
+      for them.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_111
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'CDK''s own provider roles: the LogRetention singleton (logs:PutRetentionPolicy and DeleteRetentionPolicy
+      on *) and BucketDeployment (cloudfront:CreateInvalidation on *; its S3 writes are scoped to its
+      destination bucket). Neither action reads or changes data, and the constructs take no resource scope
+      for them.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_111
+    path: '*-uc-business-operations.template.json'
+    reason: 'CDK''s own provider roles: the LogRetention singleton (logs:PutRetentionPolicy and DeleteRetentionPolicy
+      on *) and BucketDeployment (cloudfront:CreateInvalidation on *; its S3 writes are scoped to its
+      destination bucket). Neither action reads or changes data, and the constructs take no resource scope
+      for them.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_115
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'Reserved concurrency caps capacity; it is not a data control, and reserving it carves up
+      the account''s shared pool. Each trigger is bounded where it enters: API Gateway stage throttling
+      (100 RPS, burst 200), SQS event-source max_concurrency, schedules, and custom resources that run
+      once per deploy.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_115
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'Reserved concurrency caps capacity; it is not a data control, and reserving it carves up
+      the account''s shared pool. Each trigger is bounded where it enters: API Gateway stage throttling
+      (100 RPS, burst 200), SQS event-source max_concurrency, schedules, and custom resources that run
+      once per deploy.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_115
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'Reserved concurrency caps capacity; it is not a data control, and reserving it carves up
+      the account''s shared pool. Each trigger is bounded where it enters: API Gateway stage throttling
+      (100 RPS, burst 200), SQS event-source max_concurrency, schedules, and custom resources that run
+      once per deploy.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_115
+    path: '*-uc-business-operations.template.json'
+    reason: 'Reserved concurrency caps capacity; it is not a data control, and reserving it carves up
+      the account''s shared pool. Each trigger is bounded where it enters: API Gateway stage throttling
+      (100 RPS, burst 200), SQS event-source max_concurrency, schedules, and custom resources that run
+      once per deploy.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_116
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'A Lambda DLQ catches failed asynchronous invokes only. Every function here is invoked synchronously
+      (API Gateway, the AgentCore Gateway, AppSync, CloudFormation custom resources, IAM-invoked operator
+      verbs), from an SQS event source whose queue has its own redrive DLQ, or by an EventBridge schedule
+      or rule, where the next tick repeats the work; the SAP layer''s write alert has a function DLQ and
+      an alarm on it. The one async target with a payload, the agent invoker, carries the caller''s token,
+      which a DLQ would store: its retries are off and it releases its claim on failure.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_116
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'A Lambda DLQ catches failed asynchronous invokes only. Every function here is invoked synchronously
+      (API Gateway, the AgentCore Gateway, AppSync, CloudFormation custom resources, IAM-invoked operator
+      verbs), from an SQS event source whose queue has its own redrive DLQ, or by an EventBridge schedule
+      or rule, where the next tick repeats the work; the SAP layer''s write alert has a function DLQ and
+      an alarm on it. The one async target with a payload, the agent invoker, carries the caller''s token,
+      which a DLQ would store: its retries are off and it releases its claim on failure.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_116
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'A Lambda DLQ catches failed asynchronous invokes only. Every function here is invoked synchronously
+      (API Gateway, the AgentCore Gateway, AppSync, CloudFormation custom resources, IAM-invoked operator
+      verbs), from an SQS event source whose queue has its own redrive DLQ, or by an EventBridge schedule
+      or rule, where the next tick repeats the work; the SAP layer''s write alert has a function DLQ and
+      an alarm on it. The one async target with a payload, the agent invoker, carries the caller''s token,
+      which a DLQ would store: its retries are off and it releases its claim on failure.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_116
+    path: '*-uc-business-operations.template.json'
+    reason: 'A Lambda DLQ catches failed asynchronous invokes only. Every function here is invoked synchronously
+      (API Gateway, the AgentCore Gateway, AppSync, CloudFormation custom resources, IAM-invoked operator
+      verbs), from an SQS event source whose queue has its own redrive DLQ, or by an EventBridge schedule
+      or rule, where the next tick repeats the work; the SAP layer''s write alert has a function DLQ and
+      an alarm on it. The one async target with a payload, the agent invoker, carries the caller''s token,
+      which a DLQ would store: its retries are off and it releases its claim on failure.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_117
+    path: '*-uc-business-operations-console.template.json'
+    reason: These functions hold no listener and call AWS APIs only, over TLS with IAM, so a VPC adds
+      no boundary. A function that calls SAP directly is attached to the platform's private subnets under
+      security.networking (business_operations/pipeline.py, _vpc), and the AgentCore runtimes have their
+      own network mode.
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_117
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: These functions hold no listener and call AWS APIs only, over TLS with IAM, so a VPC adds
+      no boundary. A function that calls SAP directly is attached to the platform's private subnets under
+      security.networking (business_operations/pipeline.py, _vpc), and the AgentCore runtimes have their
+      own network mode.
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_117
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: These functions hold no listener and call AWS APIs only, over TLS with IAM, so a VPC adds
+      no boundary. A function that calls SAP directly is attached to the platform's private subnets under
+      security.networking (business_operations/pipeline.py, _vpc), and the AgentCore runtimes have their
+      own network mode.
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_117
+    path: '*-uc-business-operations.template.json'
+    reason: These functions hold no listener and call AWS APIs only, over TLS with IAM, so a VPC adds
+      no boundary. A function that calls SAP directly is attached to the platform's private subnets under
+      security.networking (business_operations/pipeline.py, _vpc), and the AgentCore runtimes have their
+      own network mode.
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_158
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'CloudWatch Logs encrypts every log group at rest with service-held keys, and reading a group
+      is an IAM grant. The platform CMK would add a key-policy gate on top, which is not wired: that is
+      an Aspect setting KmsKeyId from security/kms-key-arn plus a logs.amazonaws.com key-policy statement.
+      Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CKV_AWS_158
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'CloudWatch Logs encrypts every log group at rest with service-held keys, and reading a group
+      is an IAM grant. The platform CMK would add a key-policy gate on top, which is not wired: that is
+      an Aspect setting KmsKeyId from security/kms-key-arn plus a logs.amazonaws.com key-policy statement.
+      Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CKV_AWS_158
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'CloudWatch Logs encrypts every log group at rest with service-held keys, and reading a group
+      is an IAM grant. The platform CMK would add a key-policy gate on top, which is not wired: that is
+      an Aspect setting KmsKeyId from security/kms-key-arn plus a logs.amazonaws.com key-policy statement.
+      Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CKV_AWS_158
+    path: '*-uc-business-operations.template.json'
+    reason: 'CloudWatch Logs encrypts every log group at rest with service-held keys, and reading a group
+      is an IAM grant. The platform CMK would add a key-policy gate on top, which is not wired: that is
+      an Aspect setting KmsKeyId from security/kms-key-arn plus a logs.amazonaws.com key-policy statement.
+      Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CKV_AWS_173
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'Lambda encrypts environment variables at rest with its AWS-managed key. They hold names,
+      ARNs and URLs, never a secret value: configuration refers to a secret by its Secrets Manager name
+      and the function reads the value at run time.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_173
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'Lambda encrypts environment variables at rest with its AWS-managed key. They hold names,
+      ARNs and URLs, never a secret value: configuration refers to a secret by its Secrets Manager name
+      and the function reads the value at run time.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_173
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'Lambda encrypts environment variables at rest with its AWS-managed key. They hold names,
+      ARNs and URLs, never a secret value: configuration refers to a secret by its Secrets Manager name
+      and the function reads the value at run time.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_173
+    path: '*-uc-business-operations.template.json'
+    reason: 'Lambda encrypts environment variables at rest with its AWS-managed key. They hold names,
+      ARNs and URLs, never a secret value: configuration refers to a secret by its Secrets Manager name
+      and the function reads the value at run time.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_120
+    path: '*-uc-business-operations.template.json'
+    reason: 'Caching is off on purpose: every response is computed for the caller''s own entitlements
+      and for live case state, so a cached response would serve one user''s view, or a stale status, to
+      another.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_136
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: ECR encrypts every image at rest (AES-256). The image is this repository's agent code, built
+      from source by the stack's own CodeBuild project, the only principal that may push; a CMK would
+      add a key-policy gate on pulls and protect no secret.
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_51
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: The runtime pins the image by its source-hash tag, and only the stack's CodeBuild project
+      may push. Every build also moves `latest` and may re-push an unchanged hash, both of which IMMUTABLE
+      tags refuse, failing the build.
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_149
+    path: '*-uc-business-operations.template.json'
+    reason: Encrypted at rest with the account's AWS-managed Secrets Manager key, whose policy confines
+      its use to Secrets Manager calls from this account; who may read the secret is the secret's own
+      IAM grant. A CMK would add a second, key-policy gate at the cost of a kms:Decrypt grant for every
+      reader. Accepted for now; re-review by the expiry.
+    expiration: '2027-05-01'
+  - rule_id: CKV_AWS_18
+    path: '*-uc-business-operations-console.template.json'
+    reason: This bucket is itself a server access-log sink (TrailAccessLogs, HostingBucketAccessLogs).
+      Logging a log sink recurses, and its writer is the S3 logging service.
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_18
+    path: '*-uc-business-operations.template.json'
+    reason: 'Sops, Registry and Exemplars are private (BLOCK_ALL, a TLS-only bucket policy) and reachable
+      only through this stack''s IAM roles; the pack composer is the only HTTP-reachable writer, and Sops
+      and Registry are versioned. Server access logs are not on: CloudTrail S3 data events on the platform
+      trail would be the production control. Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CKV_AWS_21
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'Unversioned by design: HostingBucket holds the console bundle that BucketDeployment rebuilds
+      from source on every deploy, its access-log sink holds append-only logs expired at 90 days, and
+      Exemplars holds machine-written exemplars regenerated from case history (business_operations/data.py).'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_21
+    path: '*-uc-business-operations.template.json'
+    reason: 'Unversioned by design: HostingBucket holds the console bundle that BucketDeployment rebuilds
+      from source on every deploy, its access-log sink holds append-only logs expired at 90 days, and
+      Exemplars holds machine-written exemplars regenerated from case history (business_operations/data.py).'
+    expiration: '2027-11-01'
+  - rule_id: generic.secrets.security.detected-generic-secret.detected-generic-secret
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: The match is a CDK-generated logical id for an SSM parameter reference (SsmParameterValue...gatewayusecaseclients...),
+      the parameter holding a Gateway client's id; the template carries the reference, not a value.
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations-sap.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations-sap.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+    path: '*-uc-business-operations.template.json'
+    reason: 'Synthesized template. The high-entropy hits are names: CDK logical ids with their hash suffixes,
+      asset keys, SSM parameter references and source-hash tags. A credential has no route into a template:
+      platform.yaml names a secret by its Secrets Manager name and the config model refuses a secret-shaped
+      value there, and the CDK source is scanned by detect-secrets and gitleaks itself. The keyword, AWS-key,
+      private-key and JWT detectors still run on this file.'
+    expiration: '2027-11-01'
+  - rule_id: CKV_AWS_59
+    path: '*-uc-business-operations.template.json'
+    reason: 'The one method with AuthorizationType NONE is POST /erp-events, present only with api.erp_events_endpoint,
+      which a SAP SM59 destination calls without a Cognito session. It is not open: pipeline/erp_events.py
+      checks a shared token with hmac.compare_digest and refuses everything while the secret is empty,
+      the method is throttled, and the body is capped. openapi.yaml declares it `security: []` for the
+      same reason.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W12
+    path: '*-uc-business-operations.template.json'
+    reason: 'cfn-nag W12 flags a statement on Resource "*". Every such statement here grants only actions
+      with no resource-level permission or CDK''s own provider actions: X-Ray trace writes, the ECR auth
+      token (the pull itself is scoped to the repository), CloudWatch PutMetricData under a cloudwatch:namespace
+      condition, LogRetention''s retention calls, BucketDeployment''s CloudFront invalidation, and Transaction
+      Search''s one-time account setup (X-Ray segment destination and indexing rule, the CloudWatch Logs
+      resource policy, Application Signals discovery). The cdk-nag gate (.cdk-nag.yaml, AwsSolutions-IAM5)
+      pins each policy''s exact star_actions, so any new action on * fails CI.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W12
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'cfn-nag W12 flags a statement on Resource "*". Every such statement here grants only actions
+      with no resource-level permission or CDK''s own provider actions: X-Ray trace writes, the ECR auth
+      token (the pull itself is scoped to the repository), CloudWatch PutMetricData under a cloudwatch:namespace
+      condition, LogRetention''s retention calls, BucketDeployment''s CloudFront invalidation, and Transaction
+      Search''s one-time account setup (X-Ray segment destination and indexing rule, the CloudWatch Logs
+      resource policy, Application Signals discovery). The cdk-nag gate (.cdk-nag.yaml, AwsSolutions-IAM5)
+      pins each policy''s exact star_actions, so any new action on * fails CI.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W12
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'cfn-nag W12 flags a statement on Resource "*". Every such statement here grants only actions
+      with no resource-level permission or CDK''s own provider actions: X-Ray trace writes, the ECR auth
+      token (the pull itself is scoped to the repository), CloudWatch PutMetricData under a cloudwatch:namespace
+      condition, LogRetention''s retention calls, BucketDeployment''s CloudFront invalidation, and Transaction
+      Search''s one-time account setup (X-Ray segment destination and indexing rule, the CloudWatch Logs
+      resource policy, Application Signals discovery). The cdk-nag gate (.cdk-nag.yaml, AwsSolutions-IAM5)
+      pins each policy''s exact star_actions, so any new action on * fails CI.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W12
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'cfn-nag W12 flags a statement on Resource "*". In this runtime role that is the AgentCore
+      data-plane statement (InvokeGateway, Memory events, browser sessions) and X-Ray, ECR-token and namespaced
+      PutMetricData. ACCEPTED: the AgentCore actions take ARNs this stack does not know at synth; the
+      Gateway still needs a JWT and Memory is partitioned by actor id. Pinned by cdk-nag star_actions
+      (AwsSolutions-IAM5) with the same expiry, so a new action on * fails CI.'
+    expiration: '2027-02-01'
+  - rule_id: CFN_NAG_W28
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'Explicit names are deliberate: roles, ECR repositories, security groups and alarms are named
+      <project>-<environment>-... so operators, verify scripts, IAM and SCP conditions and other stacks
+      can find them. cfn-nag W28 warns that a change requiring replacement then fails to deploy; CloudFormation
+      reports that as a failed update and rolls back. No security property depends on it.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W35
+    path: '*-uc-business-operations.template.json'
+    reason: 'Sops, Registry and Exemplars are private (BLOCK_ALL, a TLS-only bucket policy) and reachable
+      only through this stack''s IAM roles; the pack composer is the only HTTP-reachable writer, and Sops
+      and Registry are versioned. Server access logs are not on: CloudTrail S3 data events on the platform
+      trail would be the production control. Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CFN_NAG_W35
+    path: '*-uc-business-operations-console.template.json'
+    reason: This bucket is itself a server access-log sink (TrailAccessLogs, HostingBucketAccessLogs).
+      Logging a log sink recurses, and its writer is the S3 logging service.
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W58
+    path: '*-uc-business-operations.template.json'
+    reason: 'cfn-nag cannot resolve the managed-policy ARN, which CDK builds with Fn::Join on the partition.
+      Every function''s role attaches AWSLambdaBasicExecutionRole or AWSLambdaVPCAccessExecutionRole,
+      which grant the CloudWatch Logs writes: all 40 functions in the production synth were checked, and
+      cdk-nag IAM4 pins those two policies.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W58
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'cfn-nag cannot resolve the managed-policy ARN, which CDK builds with Fn::Join on the partition.
+      Every function''s role attaches AWSLambdaBasicExecutionRole or AWSLambdaVPCAccessExecutionRole,
+      which grant the CloudWatch Logs writes: all 40 functions in the production synth were checked, and
+      cdk-nag IAM4 pins those two policies.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W58
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'cfn-nag cannot resolve the managed-policy ARN, which CDK builds with Fn::Join on the partition.
+      Every function''s role attaches AWSLambdaBasicExecutionRole or AWSLambdaVPCAccessExecutionRole,
+      which grant the CloudWatch Logs writes: all 40 functions in the production synth were checked, and
+      cdk-nag IAM4 pins those two policies.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W58
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'cfn-nag cannot resolve the managed-policy ARN, which CDK builds with Fn::Join on the partition.
+      Every function''s role attaches AWSLambdaBasicExecutionRole or AWSLambdaVPCAccessExecutionRole,
+      which grant the CloudWatch Logs writes: all 40 functions in the production synth were checked, and
+      cdk-nag IAM4 pins those two policies.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W64
+    path: '*-uc-business-operations.template.json'
+    reason: 'Usage plans meter API keys, which this API does not use: every route is behind the Cognito
+      (direct mode: Entra) authorizer except POST /erp-events, which checks its own shared token, and
+      the stage throttles every method at 100 requests per second with a burst of 200.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W68
+    path: '*-uc-business-operations.template.json'
+    reason: 'Usage plans meter API keys, which this API does not use: every route is behind the Cognito
+      (direct mode: Entra) authorizer except POST /erp-events, which checks its own shared token, and
+      the stage throttles every method at 100 requests per second with a burst of 200.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W70
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'ACCEPTED: the console distribution uses CloudFront''s default *.cloudfront.net certificate,
+      for which CloudFront sets the security policy; MinimumProtocolVersion takes effect only with a custom
+      certificate. A custom domain with an ACM certificate and TLSv1.2_2021 is the adopter''s step (cdk-nag
+      CFR4 is suppressed for the same reason).'
+    expiration: '2027-05-01'
+  - rule_id: CFN_NAG_W76
+    path: '*-uc-business-operations.template.json'
+    reason: 'cfn-nag W76 scores policy complexity (SPCM above 25), not breadth: these default policies
+      hold many narrow statements, each scoped to one table, bucket, queue, key or function of this stack
+      by ARN (and, on the platform key, by kms:ViaService). Every wildcard in them is reviewed and pinned
+      by the cdk-nag IAM5 gate.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W76
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'cfn-nag W76 scores policy complexity (SPCM above 25), not breadth: these default policies
+      hold many narrow statements, each scoped to one table, bucket, queue, key or function of this stack
+      by ARN (and, on the platform key, by kms:ViaService). Every wildcard in them is reviewed and pinned
+      by the cdk-nag IAM5 gate.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W77
+    path: '*-uc-business-operations.template.json'
+    reason: Encrypted at rest with the account's AWS-managed Secrets Manager key, whose policy confines
+      its use to Secrets Manager calls from this account; who may read the secret is the secret's own
+      IAM grant. A CMK would add a second, key-policy gate at the cost of a kms:Decrypt grant for every
+      reader. Accepted for now; re-review by the expiry.
+    expiration: '2027-05-01'
+  - rule_id: CFN_NAG_W84
+    path: '*-uc-business-operations.template.json'
+    reason: 'CloudWatch Logs encrypts every log group at rest with service-held keys, and reading a group
+      is an IAM grant. The platform CMK would add a key-policy gate on top, which is not wired: that is
+      an Aspect setting KmsKeyId from security/kms-key-arn plus a logs.amazonaws.com key-policy statement.
+      Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CFN_NAG_W84
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'CloudWatch Logs encrypts every log group at rest with service-held keys, and reading a group
+      is an IAM grant. The platform CMK would add a key-policy gate on top, which is not wired: that is
+      an Aspect setting KmsKeyId from security/kms-key-arn plus a logs.amazonaws.com key-policy statement.
+      Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CFN_NAG_W84
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'CloudWatch Logs encrypts every log group at rest with service-held keys, and reading a group
+      is an IAM grant. The platform CMK would add a key-policy gate on top, which is not wired: that is
+      an Aspect setting KmsKeyId from security/kms-key-arn plus a logs.amazonaws.com key-policy statement.
+      Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CFN_NAG_W84
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'CloudWatch Logs encrypts every log group at rest with service-held keys, and reading a group
+      is an IAM grant. The platform CMK would add a key-policy gate on top, which is not wired: that is
+      an Aspect setting KmsKeyId from security/kms-key-arn plus a logs.amazonaws.com key-policy statement.
+      Accepted for now; re-review by the expiry.'
+    expiration: '2027-05-01'
+  - rule_id: CFN_NAG_W89
+    path: '*-uc-business-operations.template.json'
+    reason: These functions hold no listener and call AWS APIs only, over TLS with IAM, so a VPC adds
+      no boundary. A function that calls SAP directly is attached to the platform's private subnets under
+      security.networking (business_operations/pipeline.py, _vpc), and the AgentCore runtimes have their
+      own network mode.
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W89
+    path: '*-uc-business-operations-console.template.json'
+    reason: These functions hold no listener and call AWS APIs only, over TLS with IAM, so a VPC adds
+      no boundary. A function that calls SAP directly is attached to the platform's private subnets under
+      security.networking (business_operations/pipeline.py, _vpc), and the AgentCore runtimes have their
+      own network mode.
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W89
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: These functions hold no listener and call AWS APIs only, over TLS with IAM, so a VPC adds
+      no boundary. A function that calls SAP directly is attached to the platform's private subnets under
+      security.networking (business_operations/pipeline.py, _vpc), and the AgentCore runtimes have their
+      own network mode.
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W89
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: These functions hold no listener and call AWS APIs only, over TLS with IAM, so a VPC adds
+      no boundary. A function that calls SAP directly is attached to the platform's private subnets under
+      security.networking (business_operations/pipeline.py, _vpc), and the AgentCore runtimes have their
+      own network mode.
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W92
+    path: '*-uc-business-operations.template.json'
+    reason: 'Reserved concurrency caps capacity; it is not a data control, and reserving it carves up
+      the account''s shared pool. Each trigger is bounded where it enters: API Gateway stage throttling
+      (100 RPS, burst 200), SQS event-source max_concurrency, schedules, and custom resources that run
+      once per deploy.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W92
+    path: '*-uc-business-operations-console.template.json'
+    reason: 'Reserved concurrency caps capacity; it is not a data control, and reserving it carves up
+      the account''s shared pool. Each trigger is bounded where it enters: API Gateway stage throttling
+      (100 RPS, burst 200), SQS event-source max_concurrency, schedules, and custom resources that run
+      once per deploy.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W92
+    path: '*-uc-business-operations-knowledge.template.json'
+    reason: 'Reserved concurrency caps capacity; it is not a data control, and reserving it carves up
+      the account''s shared pool. Each trigger is bounded where it enters: API Gateway stage throttling
+      (100 RPS, burst 200), SQS event-source max_concurrency, schedules, and custom resources that run
+      once per deploy.'
+    expiration: '2027-11-01'
+  - rule_id: CFN_NAG_W92
+    path: '*-uc-business-operations-runtime.template.json'
+    reason: 'Reserved concurrency caps capacity; it is not a data control, and reserving it carves up
+      the account''s shared pool. Each trigger is bounded where it enters: API Gateway stage throttling
+      (100 RPS, burst 200), SQS event-source max_concurrency, schedules, and custom resources that run
+      once per deploy.'
+    expiration: '2027-11-01'

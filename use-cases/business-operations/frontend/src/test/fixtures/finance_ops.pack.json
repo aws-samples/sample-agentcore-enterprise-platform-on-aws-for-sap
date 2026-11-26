@@ -1,0 +1,235 @@
+{
+  "$schema": "../pack.schema.json",
+  "pack_id": "finance_ops",
+  "display_name": "Finance — Accounts Payable",
+  "description": "Procure-to-pay exception resolution: three-way matching, price/quantity variances, missing documents, duplicate invoices.",
+  "model_tier": "haiku",
+  "max_turns": 15,
+  "sap_service": {
+    "services": [
+      {
+        "service": "API_SUPPLIERINVOICE_PROCESS_SRV",
+        "entities": {
+          "supplier_invoice": {
+            "name": "A_SupplierInvoice",
+            "fields": ["SupplierInvoice", "FiscalYear", "CompanyCode", "DocumentDate", "PostingDate", "CreationDate", "SupplierInvoiceIDByInvcgParty", "InvoicingParty", "DocumentCurrency", "InvoiceGrossAmount", "UnplannedDeliveryCost", "DocumentHeaderText", "PaymentTerms", "PaymentBlockingReason", "SupplierInvoiceStatus", "ReverseDocument"]
+          },
+          "supplier_invoice_item": {
+            "name": "A_SuplrInvcItemPurOrdRef",
+            "fields": ["SupplierInvoice", "FiscalYear", "SupplierInvoiceItem", "PurchaseOrder", "PurchaseOrderItem", "Plant", "TaxCode", "DocumentCurrency", "SupplierInvoiceItemAmount", "QuantityInPurchaseOrderUnit", "SupplierInvoiceItemText"]
+          }
+        },
+        "function_imports": {
+          "Release": {
+            "params": [
+              {"name": "SupplierInvoice", "type": "Edm.String", "required": true},
+              {"name": "FiscalYear", "type": "Edm.String", "required": true},
+              {"name": "DiscountDaysHaveToBeShifted", "type": "Edm.Boolean", "required": false, "default": "false"}
+            ]
+          },
+          "Post": {
+            "params": [
+              {"name": "SupplierInvoice", "type": "Edm.String", "required": true},
+              {"name": "FiscalYear", "type": "Edm.String", "required": true}
+            ]
+          },
+          "Cancel": {
+            "params": [
+              {"name": "SupplierInvoice", "type": "Edm.String", "required": true},
+              {"name": "FiscalYear", "type": "Edm.String", "required": true},
+              {"name": "PostingDate", "type": "Edm.DateTime", "required": true, "note": "OData V2 URI literal datetime'YYYY-MM-DDT00:00:00' (not /Date(ms)/, quoted or not); the original invoice's own PostingDate per short_pay 3.1"},
+              {"name": "ReversalReason", "type": "Edm.String", "required": true, "note": "Two-character reason code, quoted: '01' unless the operator configured another (short_pay 3.2)"}
+            ]
+          }
+        }
+      },
+      {
+        "service": "API_PURCHASEORDER_PROCESS_SRV",
+        "entities": {
+          "purchase_order": {
+            "name": "A_PurchaseOrder",
+            "fields": ["PurchaseOrder", "CompanyCode", "PurchaseOrderType", "Supplier", "PurchasingOrganization", "PurchasingGroup", "PurchaseOrderDate", "DocumentCurrency", "PaymentTerms", "CreatedByUser", "CreationDate", "LastChangeDateTime", "Language", "IncotermsClassification", "IncotermsLocation1", "IncotermsLocation2", "ValidityStartDate", "ValidityEndDate", "ExchangeRate", "ExchangeRateIsFixed", "ReleaseIsNotCompleted", "PurchasingCompletenessStatus"]
+          },
+          "purchase_order_item": {
+            "name": "A_PurchaseOrderItem",
+            "fields": ["PurchaseOrder", "PurchaseOrderItem", "PurchaseOrderItemText", "Material", "Plant", "StorageLocation", "MaterialGroup", "OrderQuantity", "PurchaseOrderQuantityUnit", "NetPriceAmount", "NetPriceQuantity", "DocumentCurrency", "TaxCode", "PurchaseOrderItemCategory", "AccountAssignmentCategory", "GoodsReceiptIsExpected", "InvoiceIsExpected", "InvoiceIsGoodsReceiptBased", "IsCompletelyDelivered", "IsFinallyInvoiced", "PurchaseRequisition", "PurchaseRequisitionItem", "DeliveryAddressID", "DeliveryAddressName", "DeliveryAddressCityName", "DeliveryAddressPostalCode", "DeliveryAddressStreetName", "DeliveryAddressCountry"]
+          },
+          "purchase_order_schedule_line": {
+            "name": "A_PurchaseOrderScheduleLine",
+            "fields": ["PurchasingDocument", "PurchasingDocumentItem", "ScheduleLine", "DeliveryDate", "ScheduleLineOrderQuantity", "PurchaseOrderQuantityUnit", "ScheduleLineDeliveryDate", "PerformancePeriodStartDate", "PerformancePeriodEndDate"]
+          }
+        }
+      },
+      {
+        "service": "API_MATERIAL_DOCUMENT_SRV",
+        "entities": {
+          "goods_receipt": {
+            "name": "A_MaterialDocumentHeader",
+            "fields": ["MaterialDocumentYear", "MaterialDocument", "InventoryTransactionType", "DocumentDate", "PostingDate", "CreationDate", "CreationTime", "CreatedByUser", "MaterialDocumentHeaderText", "ReferenceDocument", "VersionForPrintingSlip", "ManualPrintIsTriggered", "CtrlPostgForExtWhseMgmtSyst", "GoodsMovementCode"]
+          },
+          "goods_receipt_item": {
+            "name": "A_MaterialDocumentItem",
+            "fields": ["MaterialDocumentYear", "MaterialDocument", "MaterialDocumentItem", "Material", "Plant", "StorageLocation", "Batch", "GoodsMovementType", "InventoryStockType", "InventoryValuationType", "InventorySpecialStockType", "Supplier", "Customer", "SalesOrder", "SalesOrderItem", "SalesOrderScheduleLine", "PurchaseOrder", "PurchaseOrderItem", "WBSElement", "ManufacturingOrder", "ManufacturingOrderItem", "GoodsMovementRefDocType", "GoodsMovementReasonCode", "Delivery", "DeliveryItem", "AccountAssignmentCategory", "CostCenter", "ControllingArea", "CostObject", "GLAccount", "FunctionalArea", "ProfitabilitySegment", "ProfitCenter", "MasterFixedAsset", "FixedAsset", "MaterialBaseUnit", "QuantityInBaseUnit", "EntryUnit", "QuantityInEntryUnit", "CompanyCodeCurrency", "GdsMvtExtAmtInCoCodeCrcy", "SlsPrcAmtInclVATInCoCodeCrcy", "FiscalYear", "FiscalYearPeriod", "FiscalYearVariant", "IssgOrRcvgMaterial", "IssgOrRcvgBatch", "IssuingOrReceivingPlant", "IssuingOrReceivingStorageLoc", "IssuingOrReceivingStockType", "IssgOrRcvgSpclStockInd", "IssuingOrReceivingValType", "IsCompletelyDelivered", "MaterialDocumentItemText", "GoodsRecipientName", "UnloadingPointName", "ShelfLifeExpirationDate", "ManufactureDate", "SerialNumbersAreCreatedAutomly", "Reservation", "ReservationItem", "ReservationIsFinallyIssued", "SpecialStockIdfgSalesOrder", "SpecialStockIdfgSalesOrderItem", "SpecialStockIdfgWBSElement", "IsAutomaticallyCreated", "MaterialDocumentLine", "MaterialDocumentParentLine", "HierarchyNodeLevel", "GoodsMovementIsCancelled", "ReversedMaterialDocumentYear", "ReversedMaterialDocument", "ReversedMaterialDocumentItem", "ReferenceDocumentFiscalYear", "InvtryMgmtRefDocumentItem", "InvtryMgmtReferenceDocument", "MaterialDocumentPostingType", "InventoryUsabilityCode", "EWMWarehouse", "EWMStorageBin", "DebitCreditCode", "StockSegment", "IssgOrRcvgStockSegment"]
+          }
+        }
+      }
+    ]
+  },
+  "entitlement": {
+    "groups": ["ap-clerk", "ap-manager"],
+    "approve_groups": ["ap-manager"]
+  },
+  "constants": {
+    "QTY_VARIANCE_PCT": 5,
+    "QTY_VARIANCE_UNITS": 10,
+    "PRICE_VARIANCE_PCT": 2,
+    "PRICE_VARIANCE_ABS_USD": 0.50,
+    "LINE_AMOUNT_TOLERANCE_USD": 100,
+    "DUPLICATE_MATCH_WINDOW_USD": 100,
+    "MISSING_GR_ESCALATION_DAYS": 5,
+    "GOODS_IN_TRANSIT_REMINDER_DAYS": 3,
+    "SHORT_PAY_DISPUTE_WINDOW_DAYS": 30,
+    "AUTO_WRITE_LIMIT_USD": 100000
+  },
+  "gateway_tools": [
+    "get_case_state",
+    "update_case_state",
+    "odata_function_import",
+    "search_sap_sops",
+    "search_sap_api_docs",
+    "load_sop",
+    "send_notification",
+    "demo_create_ticket",
+    "demo_get_ticket",
+    "odata_read",
+    "odata_count"
+  ],
+  "write_guards": ["po_reference", "no_duplicate", "gr_coverage", "within_tolerance_or_approved"],
+  "verifier": { "enabled": false, "model_tier": "haiku", "guidance": "On a price or quantity variance approval ticket, Approve means release as billed. That holds for a quantity variance even though the goods receipt shows fewer units than billed: the approver accepted exactly that difference. A Deny whose comment asks to pay only what the purchase order and goods receipt support is the answer short pay, not a refusal to write: it routes to the short_pay SOP. A Deny that says the invoice must be corrected to the PO price, or that the overcharge must be disputed with the supplier, asks for the same thing and is also short pay. This service has no partial-payment write, so a short pay is executed by Cancel on the blocked invoice with a reversal reason, and the supplier reissues for the supported amount. So after such a Deny, a Cancel of the whole invoice is the expected write and a Release is wrong. Any other Deny means no write: manual review. A Release after a short-pay Deny, or any write after a plain Deny, is a contradiction. A Cancel is correct only when a ticket on this case answered short pay, or approved the Cancel itself; a Cancel with no such ticket, or after an approval in full, is a contradiction." },
+  "process_type_to_sop": {
+    "price_variance": "finance_ops/price_variance.txt",
+    "quantity_variance": "finance_ops/quantity_variance.txt",
+    "uom_mismatch": "finance_ops/uom_mismatch.txt",
+    "missing_goods_receipt": "finance_ops/missing_goods_receipt.txt",
+    "missing_purchase_order": "finance_ops/missing_purchase_order.txt",
+    "duplicate_invoice": "finance_ops/duplicate_invoice.txt",
+    "short_pay": "finance_ops/short_pay.txt",
+    "invoice_matching": "finance_ops/invoice_matching.txt",
+    "three_way_match": "finance_ops/invoice_matching.txt",
+    "ap_exception": "finance_ops/invoice_matching.txt"
+  },
+  "source": {
+    "label": "AP invoice exceptions",
+    "kind": "filter",
+    "service": "API_SUPPLIERINVOICE_PROCESS_SRV",
+    "entity": "A_SupplierInvoice",
+    "filter": "PaymentBlockingReason ne '' and ReverseDocument eq ''",
+    "expand": "to_SuplrInvcItemPurOrdRef",
+    "select": "SupplierInvoice,FiscalYear,CompanyCode,DocumentDate,PostingDate,InvoicingParty,InvoiceGrossAmount,DocumentCurrency,PaymentBlockingReason,SupplierInvoiceStatus,SupplierInvoiceIDByInvcgParty,to_SuplrInvcItemPurOrdRef",
+    "short_id": "ap",
+    "key": [
+      { "field": "SupplierInvoice", "source": "parent", "strip": true, "as": "document_number" },
+      { "field": "FiscalYear", "source": "parent", "strip": true, "fallback": "0001", "as": "item_id" }
+    ],
+    "iterate": { "path": "to_SuplrInvcItemPurOrdRef" },
+    "skip_when": [
+      { "field": "SupplierInvoice", "op": "blank", "scope": "parent" }
+    ],
+    "process_type": { "default": "invoice_matching" },
+    "title": "Invoice {parent.SupplierInvoice} / FY {parent.FiscalYear} — Block: {parent.PaymentBlockingReason} ({parent.DocumentCurrency} {abs_amount})",
+    "field_map": {
+      "supplier_number":    { "path": "parent.InvoicingParty" },
+      "amount":             { "path": "parent.InvoiceGrossAmount", "cast": "abs_decimal" },
+      "currency":           { "path": "parent.DocumentCurrency" },
+      "sap_block_reason":   { "path": "parent.PaymentBlockingReason" },
+      "invoice_status":     { "path": "parent.SupplierInvoiceStatus" },
+      "company_code":       { "path": "parent.CompanyCode" },
+      "document_date":      { "path": "parent.DocumentDate", "cast": "sap_date" },
+      "posting_date":       { "path": "parent.PostingDate", "cast": "sap_date" },
+      "external_reference": { "path": "parent.SupplierInvoiceIDByInvcgParty" },
+      "purchase_order":     { "path": "child.PurchaseOrder", "strip": true, "omit_blank": true },
+      "po_line_item":       { "path": "child.PurchaseOrderItem", "strip": true, "omit_blank": true },
+      "invoice_quantity":   { "path": "child.QuantityInPurchaseOrderUnit", "cast": "abs_decimal", "omit_blank": true }
+    }
+  },
+  "fields": {
+    "supplier_number": { "label": "Supplier", "type": "string" },
+    "amount": { "label": "Amount", "type": "amount", "currency_field": "currency" },
+    "currency": { "label": "Currency", "type": "string" },
+    "sap_block_reason": { "label": "SAP block reason", "type": "string", "role": "reason" },
+    "invoice_status": { "label": "Invoice status", "type": "string", "panel": false },
+    "document_date": { "label": "Document date", "type": "date" },
+    "posting_date": { "label": "Posting date", "type": "date" },
+    "external_reference": { "label": "External reference", "type": "string" },
+    "company_code": { "label": "Company code", "type": "string" },
+    "purchase_order": { "label": "Purchase order", "type": "string", "panel": false },
+    "po_line_item": { "label": "PO line item", "type": "string", "panel": false },
+    "invoice_quantity": { "label": "Invoice quantity", "type": "decimal", "panel": false }
+  },
+  "seed": {
+    "label": "AP three-way match",
+    "summary": "Posts a purchase order, a goods receipt against it, and a blocked supplier invoice.",
+    "inputs": [
+      { "id": "po_amount", "label": "PO amount (USD)", "type": "number", "default": 50000, "min": 1 },
+      { "id": "invoice_amount", "label": "Invoice amount (USD)", "type": "number", "default": 52500, "min": 1 },
+      {
+        "id": "skip_gr",
+        "label": "Skip goods receipt",
+        "type": "boolean",
+        "default": false,
+        "hint": "Creates a missing goods receipt scenario"
+      },
+      { "id": "po_quantity", "label": "PO quantity", "type": "number", "default": 10, "min": 1, "hint": "Ordered" },
+      {
+        "id": "gr_quantity",
+        "label": "GR quantity",
+        "type": "number",
+        "default": 10,
+        "min": 0,
+        "hint": "Received",
+        "disabled_when": "skip_gr"
+      },
+      { "id": "invoice_quantity", "label": "Invoice quantity", "type": "number", "default": 10, "min": 1, "hint": "Invoiced" },
+      {
+        "id": "payment_block",
+        "label": "Payment block",
+        "type": "select",
+        "default": "R",
+        "options": [
+          { "value": "R", "label": "R — Invoice verification" },
+          { "value": "B", "label": "B — Manual payment block" }
+        ]
+      }
+    ],
+    "presets": [
+      {
+        "label": "Exact 3-way match — PO, GR and invoice agree",
+        "values": { "po_amount": 25000, "invoice_amount": 25000, "payment_block": "R", "skip_gr": false, "po_quantity": 10, "invoice_quantity": 10, "gr_quantity": 10 }
+      },
+      {
+        "label": "Price variance 5% — over-invoiced",
+        "values": { "po_amount": 50000, "invoice_amount": 52500, "payment_block": "R", "skip_gr": false, "po_quantity": 10, "invoice_quantity": 10, "gr_quantity": 10 }
+      },
+      {
+        "label": "Quantity variance — invoiced 12, received 10",
+        "values": { "po_amount": 50000, "invoice_amount": 50000, "payment_block": "R", "skip_gr": false, "po_quantity": 10, "invoice_quantity": 12, "gr_quantity": 10 }
+      },
+      {
+        "label": "Missing goods receipt — no GR posted",
+        "values": { "po_amount": 40000, "invoice_amount": 40000, "payment_block": "R", "skip_gr": true, "po_quantity": 10, "invoice_quantity": 10, "gr_quantity": 10 }
+      },
+      {
+        "label": "Under-invoiced — partial delivery",
+        "values": { "po_amount": 75000, "invoice_amount": 60000, "payment_block": "R", "skip_gr": false, "po_quantity": 10, "invoice_quantity": 8, "gr_quantity": 8 }
+      },
+      {
+        "label": "Manual payment block — exact match",
+        "values": { "po_amount": 40000, "invoice_amount": 40000, "payment_block": "B", "skip_gr": false, "po_quantity": 5, "invoice_quantity": 5, "gr_quantity": 5 }
+      },
+      {
+        "label": "Over the auto-write limit — exact match, needs a human anyway",
+        "values": { "po_amount": 150000, "invoice_amount": 150000, "payment_block": "R", "skip_gr": false, "po_quantity": 10, "invoice_quantity": 10, "gr_quantity": 10 }
+      }
+    ]
+  }
+}

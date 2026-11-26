@@ -1,0 +1,41 @@
+name: Deployment Contract Parity
+
+# expected_stacks() (infra_utils/platform_config.py) is the deployment
+# contract: plans, verification, the dashboard, and destroy consume it.
+# This job synthesizes every preset and fails when app.py and the contract
+# disagree about the footprint — the drift check that keeps them one thing.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  contract-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22'
+
+      - name: Install CDK and app dependencies
+        run: |
+          npm install -g aws-cdk
+          pip install -r requirements.txt
+
+      - name: Preset ↔ synth parity
+        run: PY=python3 bash scripts/check-contract.sh

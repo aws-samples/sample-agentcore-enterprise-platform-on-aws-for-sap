@@ -1,0 +1,210 @@
+PRICE VARIANCE — INVOICE EXCEPTION RESOLUTION
+STANDARD OPERATING PROCEDURE (SOP)
+Version 1.5
+
+================================================================================
+PURPOSE
+================================================================================
+
+This SOP defines how the agent resolves a PRICE VARIANCE exception, where the
+supplier invoice unit price differs from the purchase order (PO) unit price in
+SAP S/4HANA. It applies after three-way-match classification has identified the
+exception as a price variance.
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in RFC 2119.
+
+================================================================================
+SCOPE
+================================================================================
+
+Process Type: price_variance
+SAP Modules:  MM (Materials Management), FI-AP (Accounts Payable)
+SAP Service:  API_SUPPLIERINVOICE_PROCESS_SRV
+Entities:     A_SupplierInvoice, A_PurchaseOrder, A_PurchaseOrderItem,
+              A_MaterialDocumentItem
+
+================================================================================
+PRECONDITIONS
+================================================================================
+
+Before execution, the following MUST be true:
+
+1. The SAP MCP Server is reachable for reads and function imports.
+2. The case payload contains the supplier invoice number and fiscal year.
+3. The agent MUST NOT treat an earlier run of this case as a source of fact.
+   Conversation history from earlier runs of the same case MAY be restored (it
+   is kept for 30 days), but tool results are not, so every value the agent
+   compares or writes MUST be read from SAP in this run.
+
+================================================================================
+STEP 1: GATHER DATA
+================================================================================
+
+1.1  The agent MUST retrieve the invoice line items (A_SupplierInvoice) with
+     unit price, quantity, and PO reference.
+1.2  The agent MUST retrieve the matching PO item (A_PurchaseOrderItem) with net
+     price and any referenced contract or blanket agreement.
+1.2a The agent MUST read the PO item's GoodsReceiptIsExpected and the goods
+     receipt quantity (A_MaterialDocumentItem, filtered by PurchaseOrder/
+     PurchaseOrderItem). IF GoodsReceiptIsExpected is true and no goods receipt
+     quantity is posted, the exception is a missing goods receipt whatever the
+     price comparison shows: the agent MUST NOT release, and MUST call
+     `load_sop` with process_type `missing_goods_receipt`.
+     InvoiceIsGoodsReceiptBased false does not mean no receipt is needed.
+
+1.3  The agent MUST NOT fabricate a PO price. IF the PO item cannot be read, the
+     agent MUST try a $filter query before concluding it is unavailable.
+
+================================================================================
+STEP 2: CALCULATE VARIANCE
+================================================================================
+
+2.1  The agent MUST compute the price variance using the calculator tool:
+       price_variance_pct = |invoice_price - po_price| / po_price × 100
+       price_variance_abs = |invoice_price - po_price|
+2.2  Both limits MUST be breached for the variance to be ABOVE tolerance:
+       ABOVE  tolerance = price_variance_pct > {{PRICE_VARIANCE_PCT}}%
+                          AND price_variance_abs > ${{PRICE_VARIANCE_ABS_USD}} per unit
+       WITHIN tolerance = anything else
+     Breaching only one limit is WITHIN tolerance. A cheap part breaching the
+     percentage on pennies, and an expensive part breaching the per-unit dollar
+     figure at a fraction of a percent, are both immaterial; escalating either
+     is noise. Exceeding both is the signal. Clause 2.3 overrides this.
+2.3  Whatever clause 2.2 returns, the agent MUST treat the item as ABOVE
+     tolerance when the invoice bills more than ${{LINE_AMOUNT_TOLERANCE_USD}}
+     above the price the purchase order supports, which is the per-unit
+     overcharge multiplied by the invoiced quantity. It is NOT the difference
+     between the invoice total and the PO total, which is also large on a partial
+     invoice priced exactly as ordered.
+2.4  The agent MUST NOT apply clause 2.3 to an undercharge, because an invoice
+     priced below the purchase order bills nothing extra and the amount clause
+     2.3 measures is therefore zero.
+2.5  The agent MUST NOT measure an item against the dollar limits in clauses 2.2
+     and 2.3 when the invoice currency is anything other than USD, because those
+     limits are denominated in US dollars, as their symbol names state. The
+     invoice currency is the case attribute `currency`, taken from the invoice's
+     DocumentCurrency. Where this clause applies, the agent MUST escalate the item
+     to {{CONTACT_AP_TEAM}} for manual review, naming the currency and stating
+     that this SOP declares no tolerance for it. The agent MUST NOT convert the
+     amount into USD in order to apply a limit, because this SOP declares no
+     exchange rate and a rate the agent chose for itself would settle a material
+     variance on an assumption nobody approved.
+
+================================================================================
+STEP 3: APPLY RESOLUTION LOGIC
+================================================================================
+
+3.1  IF the variance is WITHIN tolerance:
+     - The agent MUST auto-accept and proceed to post the invoice (STEP 4).
+     - The agent MUST also compare the PO item's OrderQuantity against the
+       cumulative quantity received and invoiced to date. A 0% price variance
+       against a partial goods receipt is a partial invoice, not a fully
+       matched PO — carry that distinction into STEP 5.
+
+3.2  IF the variance is ABOVE tolerance AND the PO references a contract or
+     blanket agreement:
+     - The agent MUST raise a free-text ticket to {{CONTACT_PROCUREMENT}}
+       asking which contract terms or pricing tier applies. The ticket MUST
+       include PO#, invoice#, PO price, invoice price, and the
+       contract/agreement reference.
+     - The agent MUST update case state to "awaiting_human_input" and STOP.
+     - When procurement responds, the agent MUST use the clarified pricing to
+       re-evaluate the variance.
+
+3.3  IF the variance is ABOVE tolerance AND no contract is referenced:
+     - The agent MUST raise an approval ticket to {{CONTACT_PROCUREMENT}} with
+       PO#, invoice#, and the price difference.
+     - The request MUST be an approval ticket, never a free-text one, because
+       a free-text answer carries no decision the approval ceiling accepts.
+     - On that ticket, Approve is the answer "approve as billed".
+     - A Deny whose comment asks to pay only what the purchase order and goods
+       receipt support is the answer "short pay". Any other Deny is "denied".
+     - The request MUST name both answers the approver has: approve the invoice
+       at the invoiced price, or SHORT PAY it — accept only what the purchase
+       order price supports and dispute the overcharge. Offering approval alone
+       leaves the whole invoice unpaid for as long as the price is argued over,
+       which is the outcome this clause used to force.
+     - The agent MUST record the disputed amount, its currency, and the reason in
+       case state before stopping, because the SOP that executes a short pay
+       reads them from there and MUST NOT recompute them.
+     - The agent MUST update case state to "awaiting_human_input" and STOP.
+     - IF approved or the PO is amended → proceed to post (STEP 4).
+     - IF short pay → the agent MUST call `load_sop` with process_type
+       `short_pay` and follow that SOP in place of STEP 4.
+     - IF denied → the agent MUST mark the case for manual review by
+       {{CONTACT_AP_TEAM}}.
+
+================================================================================
+STEP 4: EXECUTE RESOLUTION
+================================================================================
+
+4.0  The agent MUST NOT call Release or Post until the duplicate check in
+     invoice_matching clauses 1.3 and 4.0 has been made in this run; IF that
+     SOP is not in this run's prompt, the agent MUST load it with `load_sop`
+     to read the check.
+
+4.1  The agent MUST NOT attempt to park the invoice — the service exposes no
+     Park function import. Once any required approval is confirmed, the agent
+     MUST clear a blocked invoice with the Release function import, or post an
+     invoice parked upstream with the Post function import.
+4.2  The agent MUST update case state after each SAP write.
+4.3  IF a write fails, the agent MUST set the case to 'error', notify
+     {{CONTACT_AP_TEAM}} with the error, and STOP.
+
+================================================================================
+STEP 5: CLOSE CASE
+================================================================================
+
+5.1  The agent MUST update case status to 'complete' once the invoice is posted.
+5.2  The agent SHOULD send a summary to {{CONTACT_AP_TEAM}}.
+5.3  IF the PO item's OrderQuantity exceeds the cumulative quantity received
+     and invoiced to date (or IsCompletelyDelivered / IsFinallyInvoiced is
+     false), the case notes and the summary notification MUST state the open
+     quantity and dollar amount remaining on the PO. A 0%-variance match
+     against a partial goods receipt MUST NOT be reported as a fully closed
+     PO.
+
+================================================================================
+ESCALATION RULES
+================================================================================
+
+| Trigger                                   | Action                              |
+|-------------------------------------------|-------------------------------------|
+| Variance above tolerance, contract present| Ticket to {{CONTACT_PROCUREMENT}}   |
+| Variance above tolerance, no contract     | Approval ticket, {{CONTACT_PROCUREMENT}}|
+| Approver chooses to short pay             | Route as short_pay                  |
+| Approval denied                           | Manual review by {{CONTACT_AP_TEAM}}|
+| High-value dispute                        | {{CONTACT_FINANCE_APPROVALS}}       |
+
+================================================================================
+CONTACTS
+================================================================================
+
+- Procurement:       {{CONTACT_PROCUREMENT}}
+- AP Team:           {{CONTACT_AP_TEAM}}
+- Finance Approvals: {{CONTACT_FINANCE_APPROVALS}}
+
+================================================================================
+TOLERANCES (CONFIGURABLE — DECLARED IN packs/finance_ops/pack.json)
+================================================================================
+
+| Parameter                       | Symbol                        |
+|---------------------------------|-------------------------------|
+| Price variance — percentage     | {{PRICE_VARIANCE_PCT}}        |
+| Price variance — absolute (USD) | {{PRICE_VARIANCE_ABS_USD}}    |
+| Amount tolerance per line (USD) | {{LINE_AMOUNT_TOLERANCE_USD}} |
+
+================================================================================
+REVISION HISTORY
+================================================================================
+
+| Version | Date | Author | Changes |
+|---|---|---|---|
+| 1.0 | 2026-07-21 | Pack author | Split from invoice_matching v1.0 |
+| 1.1 | 2026-08-18 | Pack author | Disclose open PO qty/$ on a partial goods receipt |
+| 1.2 | 2026-09-11 | Pack author | Money floor moved into STEP 2 (2.3), over-billing only (2.4) |
+| 1.3 | 2026-09-11 | Pack author | 2.5: no USD limits on a non-USD invoice |
+| 1.4 | 2026-09-11 | Pack author | Short pay offered as the second answer (3.3) |
+| 1.5 | 2026-10-23 | Pack author | Tickets (3.2) and an approval ticket with mapped answers (3.3); missing-GR check (1.2a); duplicate gate pointer (4.0) |

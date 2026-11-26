@@ -1,0 +1,71 @@
+# A complete platform.yaml for the quickstart (docs/quickstart.md): the greenfield
+# preset with this use case and one SAP system. Copy it to the repository root as
+# platform.yaml and replace every value marked CHANGE. Every other key is explained in
+# walkthrough.md, docs/configuration.md and docs/PLATFORM_YAML.md.
+
+project: agentcore-workshop        # CHANGE: short; <project>_<environment> at most 28 characters
+environment: dev                   # CHANGE if you like
+region: us-east-1                  # CHANGE: a Region with AgentCore and your Amazon Bedrock models
+
+deployment:
+  strategy: centralized
+  platform_account: "000000000000"   # CHANGE: aws sts get-caller-identity --query Account
+
+identity:
+  idp: cognito
+  self_sign_up: false              # an admin adds each user (quickstart step 7)
+
+agents:
+  pattern: orchestrator
+  memory:
+    strategies: []                 # short-term only: a strategy would extract SAP data
+
+gateway:
+  web_search: auto
+  tools: [sample-tool]
+  interceptor_extensions:          # both, in this order; the synth refuses the use case without them
+    - path: layers/sap/sap_check
+      target_prefixes: [sap-]
+      request_headers: true
+    - path: use-cases/business-operations/business_operations_check
+      target_prefixes: [business-operations-, sap-]
+      request_headers: true
+
+security:
+  cedar:
+    enabled: true
+    mode: ENFORCE
+  egress_request_action: block
+  egress_pii_entities:
+    NAME: NONE
+    ADDRESS: NONE
+    EMAIL: NONE
+    PHONE: NONE
+  egress_unscanned_responses:
+    - business-operations-sops___load_sop
+    - business-operations-knowledge___search_sap_sops
+
+observability:
+  transaction_search: true
+
+layers:
+  sap:
+    systems:
+      s4:                          # keep the key s4: the shipped pack's tools are sap-s4___...
+        system_role: sandbox         # only a sandbox may receive test data
+        base_url: https://sap.example.com/sap/opu/odata/sap/   # CHANGE: your SAP host
+        client: "100"              # CHANGE: your SAP client
+        secret_name: business-operations/sap/s4                # quickstart step 4 creates it
+    access:
+      business-operations: {read: "*", write: {s4: [function_import]}, bypass_gateway: [s4]}
+
+use_cases:
+  business-operations:
+    contacts:                      # CHANGE: who the shipped SOPs tell
+      ap_team: ap-team@example.com
+      finance_approvals: finance-approvals@example.com
+      procurement: procurement@example.com
+      warehouse: warehouse@example.com
+    test_data:
+      enabled: true                # sandbox only: the seeder posts real SAP documents
+    # api: {set_account_cloudwatch_role: true}   # only if quickstart step 2 says so

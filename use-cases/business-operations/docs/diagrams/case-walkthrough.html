@@ -1,0 +1,114 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Case walkthrough</title>
+<link rel="stylesheet" href="diagram.css">
+<style>body { --w: 1700px; } .hops { --cols: 6; --gap: 112px; }</style>
+
+<p class="kicker">SAP exception handling</p>
+<h1>Case walkthrough <em>— supplier invoice mismatch</em></h1>
+
+<div id="canvas">
+  <svg id="wires"></svg>
+
+  <div class="phases hops">
+    <div class="phase" style="grid-column: 1 / 3">Detection</div>
+    <div class="phase">Case creation</div>
+    <div class="phase core">Agent run</div>
+    <div class="phase emph">Gateway check</div>
+    <div class="phase">Written</div>
+  </div>
+
+  <div class="hops">
+    <div class="tile loose" id="exception">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <ellipse cx="12" cy="5.4" rx="7.8" ry="2.9"/>
+        <path d="M4.2 5.4v13.2c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9V5.4"/>
+        <path d="M4.2 12c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9"/></svg>
+      <div class="lab">Exception in SAP</div><div class="sub">a blocked supplier invoice</div>
+    </div>
+    <div class="tile" id="intake">
+      <img src="icons/lambda.svg" alt="">
+      <div class="lab">Poller, push or ingest queue</div><div class="sub">one mapping for all three</div>
+    </div>
+    <div class="tile" id="case">
+      <img src="icons/dynamodb.svg" alt="">
+      <div class="lab">Case</div><div class="sub">id derived from the SAP key · <code>detected</code></div>
+    </div>
+    <div class="tile core" id="run">
+      <img src="icons/agentcore.svg" alt="">
+      <div class="lab">Agent run</div><div class="sub">reads the SOP, then SAP</div>
+    </div>
+    <div class="tile gate" id="runchecks">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <path d="M12 2.6l7.6 3v6.1c0 4.6-3.2 8.2-7.6 9.7-4.4-1.5-7.6-5.1-7.6-9.7V5.6z"/>
+        <path d="M8.6 12.2l2.4 2.4 4.4-4.8"/></svg>
+      <div class="lab">Run checks</div><div class="sub">its own document, under the limit</div>
+    </div>
+    <div class="tile loose" id="write">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <ellipse cx="12" cy="5.4" rx="7.8" ry="2.9"/>
+        <path d="M4.2 5.4v13.2c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9V5.4"/>
+        <path d="M4.2 12c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9"/></svg>
+      <div class="lab">Released in SAP</div><div class="sub">case <code>complete</code></div>
+    </div>
+  </div>
+
+  <div class="hops band">
+    <div class="rowlab" style="grid-row: 2; grid-column: 1 / 4; align-self: center; padding-bottom: 0; text-align: right">Over the limit <em>— approval required</em></div>
+    <div class="tile" id="ticket" style="grid-column: 4">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <path d="M5 2.8h9.4L19 7.4v13.8H5z"/><path d="M14.4 2.8v4.6H19"/>
+        <path d="M8.2 12.4h7.6"/><path d="M8.2 16.2h4.6"/></svg>
+      <div class="lab">Approval ticket</div><div class="sub">case <code>awaiting_human_input</code></div>
+    </div>
+    <div class="tile gate" id="approver" style="grid-column: 5">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.6c0-4 3.2-6.4 7.2-6.4s7.2 2.4 7.2 6.4"/></svg>
+      <div class="lab">An approver decides</div><div class="sub">in <b>Your decision</b>: one of the SOP's outcomes, or Approve or Deny</div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="card">
+    <div class="lab">Case record</div>
+    <ul>
+      <li>The <b>Activity</b> tab: every step of every run, every <code>update_case_state</code> call and every human decision.</li>
+      <li>The SOP version each run used, and the SAP reads it made, as evidence.</li>
+      <li>A case closes <code>complete</code>, with or without a SAP write; one the agent cannot settle goes to <code>manual_review_required</code>.</li>
+    </ul>
+  </div>
+  <div class="card gate">
+    <div class="lab">Autonomous write conditions</div>
+    <ul>
+      <li>Only to the case's own document (the case document check), and only within the pack's <code>AUTO_WRITE_LIMIT_USD</code>.</li>
+      <li>An approval by a member of the pack's <code>approve_groups</code> lifts the limit for the one write the approver saw, field for field.</li>
+      <li>Above <code>DUAL_APPROVAL_LIMIT_USD</code>, two different approvers choose the same outcome: approving twice yourself is refused.</li>
+      <li>The trigger mode, set for the deployment and for each pack, starts <code>manual</code>: no new case is queued until both are <code>auto</code>. A case worker can still start one.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="legend">
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 10% 55%)" stroke-width="1.5"/></svg><b>The case</b></span>
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 12% 72%)" stroke-width="1.5" stroke-dasharray="6 5"/></svg>Over the limit</span>
+  <span>Purple = the agent</span>
+  <span>Amber = where a write can be refused</span>
+  <span>Dashed border = SAP</span>
+</div>
+
+<script>
+const EDGES = [
+  ["exception", "intake",   "h",   0, "polled, pushed or nudged", "",     1],
+  ["intake",    "case",     "h",   0, "first sighting only",      "",     2],
+  ["case",      "run",      "h",   0, "queued, or started",       "",     3],
+  ["run",       "runchecks", "h",  0, "function import: Release", "",     4],
+  ["runchecks", "write",    "h",   0, "allowed",                  "",     5],
+  ["run",       "ticket",   "v",   0, "refused: ask for approval", "dash", 5],
+  ["ticket",    "approver", "h",   0, "the change, field by field", "dash", 6],
+  ["approver",  "runchecks",    "vup", 0, "the run resumes with that write", "dash", 6],
+];
+</script>
+<script src="diagram.js"></script>

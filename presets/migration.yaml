@@ -1,0 +1,59 @@
+# Migration: an existing agent moves onto the platform; enterprise IdP.
+# Modules: 3 4 6 7 9
+# Fill in the identity block from your IdP's app registration; the client
+# secret goes in Secrets Manager, only its NAME goes here.
+# Preview the migration before touching AWS:  deploy.sh migrate plan
+project: agentcore-workshop
+environment: dev
+region: us-east-1
+deployment:
+  strategy: centralized
+  platform_account: "000000000000"  # replace with the account this migration may modify
+identity:
+  idp: entra_id
+  tenant_id: "00000000-0000-0000-0000-000000000000"   # your Entra tenant
+  client_id: "REPLACE_ME"
+  client_secret_name: "agentcore/idp-client-secret"  # pragma: allowlist secret — Secrets Manager NAME, not a value
+agents:
+  pattern: langgraph-agent    # ignored for the image once migration: is set; still selects verify/invoke behaviour
+gateway:
+  web_search: auto
+  tools: [sample-tool]
+security: {}                  # private_dependencies need networking: true
+observability:
+  transaction_search: true
+migration:
+  source:
+    platform: openshift       # where it runs today (shapes the docs, not the deploy)
+    build:                    # build here so the image is arm64 (AgentCore Runtime is arm64-only);
+      context: ./migration/simulation/existing-ec2-agent   # use image: for a registry reference instead
+      dockerfile: Dockerfile
+    port: 8000                # what the container listens on
+    invoke_path: /run         # the adapter forwards POST /invocations here
+    health_path: /healthz     # ...and GET /ping here
+    trigger: webhook          # discovery metadata; trigger/cutover stays external and is not deployed
+    env: {}                   # plain config only; secret-looking keys are refused
+    secrets: [JIRA_TOKEN, GIT_TOKEN]   # ENV NAMES; values in Secrets Manager under <project>/<env>/migration/<NAME>
+  target:
+    runtime: agentcore        # only deployable runtime today; ec2 fails closed
+    mode: adapter             # only deployable mode today; native fails closed
+  network:
+    private_dependencies: []  # customer-side hostnames the agent must reach (needs networking + connectivity)
+    connectivity: none        # vpn|transit-gateway once private_dependencies is filled
+    # receipt: {}              # after verify: VPC/subnet/SG IDs, probe evidence, tested CA version
+  stages:
+    # Runtime deployment is already in scope. These surrounding stages are
+    # explicit opt-ins and remain customer-operated; `migrate readiness`
+    # blocks cutover until each enabled stage has owner/approver/evidence/
+    # rollback/approved_at/expires_at recorded under its gate.
+    runtime: {}               # after verify: account, RuntimeArn, SourceHash, ECR digest, evidence, gate
+    data:
+      strategy: none          # retain-source or external-copy after a source-specific plan is approved
+    triggers:
+      strategy: none          # external-shadow; source-specific safe rehearsal, never deployed here
+      # external-shadow also requires source_reference, shadow_reference,
+      # safety_mode, validation_reference, and source-specific evidence.
+    traffic:
+      strategy: none          # external-canary (HTTP/webhook) or external-switch (schedule/queue)
+      # A traffic plan also records router/source/target/metrics references,
+      # canary steps where supported, abort thresholds, and an approval gate.

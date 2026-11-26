@@ -1,0 +1,205 @@
+# cdk-nag (AwsSolutions pack). `scripts/check-security.sh cdk-nag` runs it over the
+# templates the production fixtures synthesize, as CI does, and fails on any
+# error-level finding not suppressed here (scripts/check_cdk_nag.py applies these
+# with cdk-nag's own NagSuppressions).
+#
+# The rule for a suppression is .ash.yaml's: classify the finding first and fix the
+# real ones. An entry names one rule and the stacks it holds for (by template
+# suffix, so it holds for any project and environment), narrows to resources by
+# logical-id glob, and to the granular findings (`appliesTo`) it accepts; its
+# reason names the control that makes the finding safe, and its expiration is a
+# re-review date. `where` pins top-level properties of the resource, and
+# `star_actions` lists every action the resource may grant on Resource "*", so an
+# entry accepting `Resource::*` hides no statement added later. An entry that
+# matches nothing fails the gate, as does one past its expiration.
+
+suppressions:
+  # ── Lambda ──────────────────────────────────────────────────────────────────
+  - rule: AwsSolutions-IAM4
+    stacks:
+      - auth
+      - gateway
+      - layer-sap
+      - observability
+      - runtime-orchestrator
+    applies_to:
+      - "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      - "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+    reason: "CDK's default Lambda execution role. The two AWS-managed policies grant only CloudWatch Logs writes and, for a function in the VPC, ENI management; every data permission is an inline, resource-scoped grant beside them."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-L1
+    stacks:
+      - gateway
+      - layer-sap
+      - runtime-orchestrator
+    where: { Runtime: python3.13 }
+    reason: "python3.13 is the runtime the layers, the agent image, the tests and CI are built on, and the repo's declared Python. Moving to 3.14 is a deliberate, tested bump of all of them at once; a function on any other runtime still fails this rule."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-L1
+    stacks:
+      - auth
+      - gateway
+      - layer-sap
+      - observability
+      - runtime-orchestrator
+    resources:
+      - "AWS679f53fac002430cb0da5b7982bd2287*"
+      - "LogRetentionaae0aa3c5b4d4f87b02d85b201efdd8a*"
+    where: { Runtime: nodejs24.x }
+    reason: "aws-cdk-lib's own singleton providers (AwsCustomResource, LogRetention). Their code and runtime are CDK's, set to its NODEJS_LATEST, nodejs24.x, a supported LTS runtime; cdk-nag ranks against every runtime aws-cdk-lib lists, which from 2.277 includes nodejs26.x. They move when aws-cdk-lib moves NODEJS_LATEST, and a provider on any older Node still fails this rule."
+    expiration: "2027-05-01"
+
+  # ── IAM wildcards (AwsSolutions-IAM5) ───────────────────────────────────────
+  - rule: AwsSolutions-IAM5
+    stacks:
+      - layer-sap
+      - runtime-orchestrator
+    applies_to:
+      - "Action::s3:GetObject*"
+      - "Action::s3:GetBucket*"
+      - "Action::s3:List*"
+      - "Action::s3:DeleteObject*"
+      - "Action::s3:Abort*"
+      - "Action::kms:ReEncrypt*"
+      - "Action::kms:GenerateDataKey*"
+    reason: "The action sets CDK's grant_read / grant_read_write / grant_encrypt_decrypt / grant_publish emit. Each statement is on one named bucket or one key, never on Resource *; an action wildcard outside these sets still fails."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-IAM5
+    stacks:
+      - layer-sap
+    applies_to:
+      - "Resource::<*Arn>/*"
+      - "Resource::<*Arn>:*"
+      - "Resource::arn:<AWS::Partition>:s3:::<SsmParameterValue*>/*"
+      - "Resource::arn:aws:s3:::<SsmParameterValue*>/*"
+    reason: "Children of one resource this deployment owns: objects of its own bucket (named directly or read from its SSM parameter), the indexes of its own DynamoDB table, the versions of its own function, the endpoints of its own runtime."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-IAM5
+    stacks:
+      - runtime-orchestrator
+    applies_to:
+      - "Resource::arn:<AWS::Partition>:s3:::cdk-hnb659fds-assets-*/*"
+    reason: "Read of the CDK bootstrap asset bucket, which CDK's BucketDeployment, CodeBuild source and asset grants emit. The bucket holds this account's synthesized assets, written only by the deploy role."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-IAM5
+    stacks: &build_stacks
+      - runtime-orchestrator
+    resources: ["BuildRoleDefaultPolicy*"]
+    applies_to:
+      - "Resource::arn:<AWS::Partition>:logs:*:log-group:/aws/codebuild/<Build*>:*"
+      - "Resource::arn:<AWS::Partition>:codebuild:*:report-group/<Build*>-*"
+    reason: "CDK's CodeBuild project defaults: its own log group's streams and its own report groups, both named after the project."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-IAM5
+    stacks:
+      - layer-sap
+      - runtime-orchestrator
+    applies_to: ["Resource::*"]
+    star_actions:
+      - "xray:PutTraceSegments"
+      - "xray:PutTelemetryRecords"
+      - "ecr:GetAuthorizationToken"
+      - "cloudwatch:PutMetricData"
+    reason: "Actions with no resource-level permission: X-Ray trace writes, the ECR auth token (the image pull is on the repository), and CloudWatch metric writes, which carry a cloudwatch:namespace condition wherever they appear. Only applied to a policy whose Resource-* statements grant nothing else."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-IAM5
+    stacks:
+      - layer-sap
+      - runtime-orchestrator
+    resources: ["LogRetention*", "CustomCDKBucketDeployment*"]
+    applies_to: ["Resource::*"]
+    star_actions:
+      - "logs:PutRetentionPolicy"
+      - "logs:DeleteRetentionPolicy"
+      - "cloudfront:CreateInvalidation"
+      - "cloudfront:GetInvalidation"
+    reason: "CDK-owned singleton roles: LogRetention sets retention on log groups, BucketDeployment invalidates the console's CloudFront cache. Neither reads or writes data; the same two are accepted for checkov (CKV_AWS_111) in .ash.yaml."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-IAM5
+    stacks: *build_stacks
+    resources: ["RuntimeRoleDefaultPolicy*"]
+    applies_to:
+      - "Resource::*"
+      - "Resource::arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*"
+      - "Resource::arn:aws:bedrock:*:*:inference-profile/*"
+      - "Resource::arn:aws:bedrock:*::foundation-model/*"
+      - "Resource::arn:aws:ssm:*:*:parameter/*"
+      - "Resource::arn:<AWS::Partition>:bedrock-agentcore:*:runtime/*"
+      - "Resource::arn:<AWS::Partition>:bedrock-agentcore:*:workload-identity-directory/default/workload-identity/*"
+      - "Resource::arn:<AWS::Partition>:secretsmanager:*:secret:bedrock-agentcore-identity!default/oauth2/*"
+    star_actions:
+      - "xray:PutTraceSegments"
+      - "xray:PutTelemetryRecords"
+      - "ecr:GetAuthorizationToken"
+      - "cloudwatch:PutMetricData"
+      - "bedrock-agentcore:InvokeGateway"
+      - "bedrock-agentcore:GetGateway"
+      - "bedrock-agentcore:ListGateways"
+      - "bedrock-agentcore:StartBrowserSession"
+      - "bedrock-agentcore:StopBrowserSession"
+      - "bedrock-agentcore:ConnectBrowserAutomationStream"
+      - "bedrock-agentcore:CreateEvent"
+      - "bedrock-agentcore:GetEvent"
+      - "bedrock-agentcore:ListEvents"
+      - "bedrock-agentcore:DeleteEvent"
+      - "bedrock-agentcore:ListSessions"
+    reason: "The AgentCore runtime role (stacks/runtime_stack.py). Each wildcard is a name prefix this deployment owns: its runtimes, its workload identity, its token-vault secrets (Secrets Manager's random suffix), its SSM path, its runtime log groups; Amazon Bedrock models are any-Region because cross-Region inference profiles route there. Memory events are partitioned by an actorId condition. Memory retrieval is on this deployment's Memory, under a namespace condition. Accepted: the AgentCoreAccess statement (Gateway, browser) is still on Resource * until it is scoped to the gateway ARN."
+    expiration: "2027-02-01"
+  - rule: AwsSolutions-IAM5
+    stacks: [layer-sap]
+    resources: ["LayerRolePolicy*"]
+    applies_to:
+      - "Resource::arn:<AWS::Partition>:logs:*:log-group:/aws/bedrock-agentcore/runtimes/*"
+      - "Resource::arn:<AWS::Partition>:logs:*:log-group:*"
+      - "Resource::arn:<AWS::Partition>:bedrock-agentcore:*:workload-identity-directory/default/workload-identity/*"
+    reason: "The SAP MCP server runtime's role, AgentCore's documented runtime execution policy: log writes on its own runtime's log groups, logs:Describe* (which needs log-group:*, and reads no log data), its own workload identity. Its Resource-* statement is the X-Ray and ECR-token entry's."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-IAM5
+    stacks: [gateway]
+    resources: ["GatewayRoleDefaultPolicy*"]
+    applies_to:
+      - "Resource::arn:aws:lambda:*:function:*-tool-*"
+      - "Resource::arn:aws:bedrock-agentcore:*:gateway/*"
+    reason: "The Gateway's role: invoke only this deployment's own tool functions (name prefix), and authorize actions against its own policy engine for its gateway, whose ARN cannot be referenced from the role it is created with."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-IAM5
+    stacks: [observability]
+    resources: ["TraceSegmentDestinationCustomResourcePolicy*"]
+    applies_to:
+      - "Resource::*"
+      - "Resource::arn:<AWS::Partition>:logs:*:*:log-group:aws/spans:*"
+      - "Resource::arn:<AWS::Partition>:logs:*:*:log-group:/aws/application-signals/data:*"
+      - "Resource::arn:<AWS::Partition>:iam::*:role/aws-service-role/application-signals.cloudwatch.amazonaws.com/AWSServiceRoleForCloudWatchApplicationSignals"
+      - "Resource::arn:<AWS::Partition>:cloudtrail:*:*:channel/aws-service-channel/application-signals/*"
+    star_actions:
+      - "xray:GetTraceSegmentDestination"
+      - "xray:UpdateTraceSegmentDestination"
+      - "xray:GetIndexingRules"
+      - "xray:UpdateIndexingRule"
+      - "logs:PutResourcePolicy"
+      - "logs:DescribeResourcePolicies"
+      - "application-signals:StartDiscovery"
+    reason: "The one-shot custom resource that turns on CloudWatch Transaction Search: account-level X-Ray and Logs settings with no resource-level permission, the two fixed log groups it writes, and Application Signals' own service-linked role and channel (the iam:CreateServiceLinkedRole statement is conditioned on that service name)."
+    expiration: "2027-05-01"
+  # ── Secrets, identity, edge ─────────────────────────────────────────────────
+  - rule: AwsSolutions-SMG4
+    stacks: [auth, gateway]
+    resources: ["M2MClientSecret*", "UseCaseClientSecret*", "DelegatingClientSecret*"]
+    reason: "Each secret is a copy of a Cognito app client's secret (SecretString is the client's ClientSecret). Cognito is the source of truth, so a Secrets Manager rotation would only desynchronize the copy; rotating means replacing the app client."
+    expiration: "2027-05-01"
+  - rule: AwsSolutions-COG8
+    stacks: [auth]
+    resources: ["UserPool*"]
+    reason: "Accepted: the pool is on the Essentials feature plan, without Plus's threat protection, which is billed per monthly active user. Sign-up is admin-only (AllowAdminCreateUserOnly) or through the configured IdP; a production adopter with public users should take the Plus plan."
+    expiration: "2027-02-01"
+  - rule: AwsSolutions-CB4
+    stacks: *build_stacks
+    resources: ["Build*"]
+    reason: "The project has no artifacts (NO_ARTIFACTS): its only output is the image it pushes to ECR, which encrypts at rest. Its logs go to CloudWatch, outside this key's scope."
+    expiration: "2027-05-01"
+  - rule: CdkNagValidationFailure
+    stacks: [networking]
+    resources: ["VPC*EndpointSecurityGroup*"]
+    applies_to: ["AwsSolutions-EC23"]
+    reason: "EC23 cannot evaluate an ingress whose source is the VPC's own CIDR (Fn::GetAtt CidrBlock). These are CDK's interface-endpoint security groups: 443 from the VPC only, never 0.0.0.0/0."
+    expiration: "2027-05-01"

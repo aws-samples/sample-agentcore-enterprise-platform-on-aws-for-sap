@@ -1,0 +1,26 @@
+# The manifest is the only file the platform reads about your use case.
+# Everything here is validated at load time (infra_utils/platform_config.py).
+name: {{name}}                  # must match this directory's name
+owner: {{owner}}                # who reviews changes to this folder
+summary: {{summary}}
+# The docs/PLATFORM_INTERFACE.md version this use case is written against; a mismatch fails the synth.
+platform_interface: {{platform_interface}}
+# auth and gateway for the reader client below; layer-sap for the SAP targets,
+# the layer's claim check and its access row (layers/sap/walkthrough.md).
+requires: [auth, gateway, layer-sap]
+stacks: [uc-{{name}}]
+entry: stack.py
+# Created by the platform on its user pool and admitted to the shared Gateway.
+# Its scope becomes uc-{{name}}/read, which the Cedar read permits key on.
+gateway_clients:
+  - name: reader
+    scopes: [read]
+# The pages the platform's entry docs list for this use case (scripts/gen_use_case_index.py).
+docs:
+  title: {{name}}
+  entry: walkthrough.md
+  enable: walkthrough.md#enable-build-verify
+  quickstart: walkthrough.md#enable-build-verify
+  remove: walkthrough.md#remove
+  pages:
+    - {title: Walkthrough, path: walkthrough.md}

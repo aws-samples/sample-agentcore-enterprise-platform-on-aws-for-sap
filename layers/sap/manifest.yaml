@@ -1,0 +1,13 @@
+# The manifest is the only file the platform reads about this layer.
+name: sap
+owner: business-operations-maintainers   # who reviews changes to this folder
+summary: SAP layer — the AWS for SAP MCP server runtimes and Gateway targets every SAP use case shares, and the check that refuses a SAP call no use case has claimed.
+# What stack.py reads: gateway/id, gateway/role-arn (its targets and the invoke
+# grant), gateway/interceptor-role-arn (its check's settings) and
+# ops-topic/arn (where a write outside CloudFormation is reported).
+requires: [gateway, ops-topic]
+alarm_topic: true
+# access.<use case>: config load refuses a row for a use case that is not installed.
+use_case_maps: [access]
+stacks: [layer-sap]
+entry: stack.py

@@ -1,0 +1,26 @@
+# Parity fixture: the business-operations use case enabled with Cedar and its
+# interceptor check, and the SAP layer it requires (with no system), so check-contract.sh
+# synthesizes its stack, policies included.
+project: agentcore-workshop
+environment: dev
+
+gateway:
+  interceptor_extensions:
+    - path: layers/sap/sap_check
+      target_prefixes: [sap-]
+      request_headers: true
+    - path: use-cases/business-operations/business_operations_check
+      target_prefixes: [business-operations-, sap-]
+      request_headers: true
+
+security:
+  cedar:
+    enabled: true
+
+layers:
+  sap:
+    access:
+      business-operations: {read: "*"}
+
+use_cases:
+  business-operations: {}

@@ -1,0 +1,91 @@
+# business-operations: the blocks to merge into a platform.yaml that `deploy.sh design`
+# wrote. Merge each top-level key into the one already there; replace the placeholders.
+# walkthrough.md ("Enable", "SAP") and docs/configuration.md explain every key; an unknown key fails the synth.
+# The operator sets all of it. security and gateway are what this use case requires of the
+# platform; layers.sap.systems and the access row are the operator's grant to it, and the
+# use case's claim may use less of that row, never more. quickstart.platform.yaml is this
+# file merged into the greenfield preset.
+
+security:
+  cedar:
+    enabled: true
+    mode: ENFORCE          # LOG_ONLY refuses nothing: read docs/security.md first
+  egress_request_action: block   # refuse a call the guardrail would rewrite, not mask it
+  # When security.egress_filter is on (production requires it), the Gateway guardrail masks
+  # these in every tool call and response; a supplier's name and a recipient's address are the work, and a
+  # masked recipient fails send_notification. SSNs and card numbers stay blocked.
+  egress_pii_entities:
+    NAME: NONE
+    ADDRESS: NONE
+    EMAIL: NONE
+    PHONE: NONE
+  # The SOPs this deployment authored, loaded whole or searched: their G/L accounts read as
+  # card numbers to the guardrail. Only the response goes unscanned. Never a SAP tool.
+  egress_unscanned_responses:
+    - business-operations-sops___load_sop
+    - business-operations-knowledge___search_sap_sops
+
+gateway:
+  interceptor_extensions:  # both, in this order; the synth refuses the use case without them
+    - path: layers/sap/sap_check
+      target_prefixes: [sap-]
+      request_headers: true
+    - path: use-cases/business-operations/business_operations_check
+      target_prefixes: [business-operations-, sap-]
+      request_headers: true
+
+layers:
+  sap:
+    systems:
+      s4:                  # the system key packs name (`sap-s4___odata_read`); keep it per landscape
+        # Required: sandbox, development, quality or production. Only a sandbox is
+        # seeded with test data or run evals against.
+        system_role: sandbox
+        base_url: https://sap.example.com/sap/opu/odata/sap/
+        client: "100"
+        # Two stacks in one account and Region that keep this name share one secret, and so one
+        # SAP login. To keep them apart, prefix it: <project>-<env>/business-operations/sap/s4.
+        secret_name: business-operations/sap/s4   # create it: deploy.sh layer run sap secrets s4
+        # flow: basic       # or m2m-sap, m2m-oidc, obo (layers/sap/walkthrough.md)
+        # type: ECC         # default S4HANA
+        # SAP saying an exception happened (docs/lifecycle.md, "1. Detection"): who may
+        # assume s4's sender role and put its events on the layer's bus. The SAP host's
+        # EC2 instance role, or an IAM Roles Anywhere role on premises. With it, add
+        # `ingest: [s4]` to the access row below.
+        # senders: ["arn:aws:iam::123456789012:role/sap-host-role"]
+    access:
+      # read and write through the Gateway; bypass_gateway: the Basic systems the poller and
+      # the test-data seeder call outside it. The shipped packs write only through
+      # function imports (finance_ops: Release, Post, Cancel), so that is the one write
+      # named. A pack that creates or updates adds it here, `{s4: [function_import,
+      # update]}`; `write: "*"` is every write each system has on.
+      business-operations: {read: "*", write: {s4: [function_import]}, bypass_gateway: [s4]}
+
+use_cases:
+  business-operations:
+    # Who the SOPs' {{CONTACT_<NAME>}} name. The shipped SOPs cite these four, and the
+    # synth warns about any left unset; PUT /deployment/settings overrides them per stack. Keys are
+    # lower snake-case: {{CONTACT_AP_TEAM}} is ap_team.
+    contacts:
+      ap_team: ap-team@example.com
+      finance_approvals: finance-approvals@example.com
+      procurement: procurement@example.com
+      warehouse: warehouse@example.com
+    # test_data:
+    #   enabled: true      # ops.py seed posts real SAP documents: demo systems only
+    # promotion:
+    #   role: quality      # only on a QAS stack; unset follows deployment.mode
+
+# The identity administrator's, only with a corporate IdP:
+# identity:
+#   # Brokered: IdP groups onto this use case's groups (walkthrough.md, "User access").
+#   group_claim: groups
+#   group_map:
+#     business-operations:
+#       "<IdP group id>": [business-operations-users]
+#   # Direct (identity.mode: direct): an app registration per gateway client in
+#   # manifest.yaml (docs/direct-mode.md).
+#   use_case_clients:
+#     business-operations:
+#       reader: {client_id: <READER>, client_secret_name: business-operations/entra/reader}
+#       writer: {client_id: <WRITER>, client_secret_name: business-operations/entra/writer}

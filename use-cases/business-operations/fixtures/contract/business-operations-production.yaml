@@ -1,0 +1,73 @@
+# Parity fixture: presets/production.yaml with business-operations enabled, so
+# check-contract.sh proves the use case synthesizes under deployment.mode:
+# production. Keep the rest in step with the preset.
+project: agentcore-production
+environment: prod
+region: us-east-1
+
+deployment:
+  mode: production
+  strategy: centralized
+  platform_account: "000000000000"
+
+identity:
+  idp: entra_id
+  mode: brokered
+  tenant_id: 00000000-0000-0000-0000-000000000000
+  client_id: REPLACE_ME
+  client_secret_name: agentcore/idp-client-secret
+
+agents:
+  pattern: strands-agent
+  model_id: us.anthropic.claude-sonnet-4-6
+  allowed_models:
+    - us.anthropic.claude-sonnet-4-6
+  memory:
+    event_expiry_days: 30
+
+gateway:
+  # Production requires an explicit decision instead of region-dependent auto.
+  web_search: "off"
+  tools: [sample-tool]
+  interceptor_extensions:
+    - path: layers/sap/sap_check
+      target_prefixes: [sap-]
+      request_headers: true
+    - path: use-cases/business-operations/business_operations_check
+      target_prefixes: [business-operations-, sap-]
+      request_headers: true
+
+security:
+  networking: true
+  cloudtrail_alerting: true
+  resource_policies: true
+  egress_filter: true
+  egress_request_action: block
+  require_guardrails: true
+  cedar:
+    enabled: true
+    mode: ENFORCE
+  traceability: true
+  org_id: o-example1234
+
+observability:
+  transaction_search: true
+  alarms: true
+  alarm_email: ops@REPLACE_ME.invalid
+  log_retention_days: 90
+
+use_cases:
+  business-operations: {}
+
+layers:
+  sap:
+    # production refuses latest: a pinned server, read from a runtime's startup banner
+    image_tag: "1.1.0-1042"
+    systems:
+      s4:
+        system_role: production
+        base_url: https://sap.example.com/sap/opu/odata/sap/
+        client: "100"
+        secret_name: business-operations/sap/s4
+    access:
+      business-operations: {read: "*", write: {s4: [function_import]}, bypass_gateway: [s4]}

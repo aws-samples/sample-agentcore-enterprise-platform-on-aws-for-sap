@@ -1,0 +1,980 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aws-samples/sample-agentcore-enterprise-platform-on-aws-for-sap/packs/pack.schema.json",
+  "$comment": "No $ref anywhere in this file: business_operations/validate_packs.py implements a stdlib subset of the draft and refuses a keyword it does not know. Inline every constraint.",
+  "title": "Use case pack",
+  "description": "One directory under packs/ is one pack, and this file is that pack: the agent config, the `source` block that says where its exceptions come from, and the `fields` block that says what its attributes are called and how they render. A pack is published into one registry.json object: the deploy seeds a new development stack from this directory, and after that a pack moves as a bundle (`ops.py bundle import`), keeping content and constants an analyst already changed over HTTP. What a schema cannot express — the cross-pack collisions, and the agreement between this file, the use case's Gateway tools and sops/ — is checked by business_operations/validate_packs.py at synth.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pack_id",
+    "display_name",
+    "description",
+    "process_type_to_sop"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Always `../pack.schema.json`. Present so an editor validates this document as it is typed; stripped by registry.build() and never published."
+    },
+    "pack_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "This pack's identity, and it MUST equal the directory name — validate_packs.py check 1. It is an entitlement subject, the readable half of every case_id this pack mints, and the key the SOP index and the entitlement map are built on. The pattern is the `PackId` definition in types/cases.schema.json, and no test pins the two together."
+    },
+    "display_name": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "What an operator sees in the pack switcher and on a case."
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "Capped because registry.json inlines it for every pack and every reader loads that at cold start. One paragraph on what this use case is for. Read by humans, not by the agent — the agent's framing is base_prompt.txt."
+    },
+    "model_tier": {
+      "type": "string",
+      "enum": [
+        "haiku",
+        "sonnet",
+        "opus"
+      ],
+      "default": "sonnet",
+      "description": "The same set as the agent's MODEL_TIERS and business_operations/runtime.TIER_ENV (a test pins them). `opus` is served only when the deployment allows an Opus model; a pack naming a tier the deployment does not serve fails the synth rather than running on another model."
+    },
+    "max_turns": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 15,
+      "default": 15,
+      "description": "MaxTurnsHook is the only thing that stops a looping agent, and every turn re-reads the whole cached prompt — so a high cap turns one looping case into a runaway bill. Benchmarked need is 5-7 turns, so 15 is already 2x headroom. Raise the ceiling deliberately, with a measurement, rather than raising one pack past it."
+    },
+    "run_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What one run may spend before it stops. Either limit may be left out, and then its default applies (DEFAULT_RUN_BUDGET in agent/utils/hooks.py, the same values as below); a pack with no run_budget gets both. The check runs after each model response and before any tool that response asked for, so a run over budget never starts another tool call: it stops with RUN_BUDGET_EXCEEDED and the case parks at manual_review_required. Structure, like max_turns: a cost brake is not an analyst's setting.",
+      "properties": {
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2000000,
+          "description": "Every token the model processes in the run, summed over all its calls: input, output, cache reads and cache writes. Cache reads are most of it. A measured run is about 280k, so the default is about 7x that. Not the per-response output cap, which is runtime.max_tokens."
+        },
+        "max_cost_usd": {
+          "type": "number",
+          "minimum": 0.0001,
+          "default": 0.5,
+          "description": "The run's estimated model cost in USD, priced the way AgentEstimatedCostUSD is and including the write verifier's calls. Measured runs cost $0.01-0.04 and none has reached $0.10, so the default stops only a run far past normal, after the p90 cost alarm has already fired."
+        }
+      }
+    },
+    "model_effort": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "description": "The agent model's effort, sent as Messages API `output_config.effort`. Absent means the model default — `high` on Sonnet 5.5, `medium` on Haiku 5.5 and Opus 5.5 — so the same value is a change on one tier and a no-op on the other. Lower effort means fewer thinking and output tokens per turn; set it with a benchmark, not by guess."
+    },
+    "context_editing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "keep_tool_uses"
+      ],
+      "description": "Server-side context editing (`clear_tool_uses_20250919`): once the request passes a size, the oldest tool results are replaced with a placeholder in what the model is sent, so a SAP read already acted on stops being re-billed every turn. Absent means off. The client history is untouched — Memory, the resume path and the evidence trail still hold every result. The system prompt and tool list stay cached; the message cache is rewritten from the first cleared result, which is what `clear_at_least_tokens` rations.",
+      "properties": {
+        "keep_tool_uses": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many of the most recent tool uses keep their results."
+        },
+        "trigger_input_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Clear only once the request reaches this many input tokens. Absent means the API default."
+        },
+        "clear_at_least_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Skip a clear that would free fewer tokens than this, so a cache rewrite is only paid for a real saving. Absent means no floor."
+        }
+      }
+    },
+    "sap_service": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The SAP services this pack's agent is told about, injected into the platform prompt at {SAP_SERVICE_INFO}. Documentation for the model, not a connection: what the agent may actually call is gateway_tools, and what it is permitted to call is Cedar.",
+      "properties": {
+        "services": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "service"
+            ],
+            "properties": {
+              "service": {
+                "type": "string",
+                "description": "The OData service name, e.g. API_SUPPLIERINVOICE_PROCESS_SRV."
+              },
+              "entities": {
+                "type": "object",
+                "description": "Alias → entity, so the prompt can name a thing rather than an entity set.",
+                "propertyNames": {
+                  "pattern": "^[a-z][a-z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "fields": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              "function_imports": {
+                "type": "object",
+                "description": "The literal SAP function import name (e.g. Release, Post, Cancel) → its params, pinned so the agent can skip a get_metadata call for anything already listed here. Unlike `entities`, the key is not an alias — skill_router.py quotes it verbatim in the prompt and the agent calls odata_function_import with that exact name.",
+                "additionalProperties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "sap_system": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Which configured SAP system this pack reads and writes, a key of the SAP layer's `layers.sap.systems` that this use case may read. Unset means the only system when exactly one is. Its tools in `gateway_tools` are on that system's target, `sap-<system>`. Privileged: it picks which credentials the pack's cases are read with.",
+      "maxLength": 16
+    },
+    "constants": {
+      "type": "object",
+      "description": "The thresholds this pack's SOPs quote by name — a variance percentage, an escalation window. Published as the constants allowlist, so a symbol absent from here cannot be substituted into a prompt at all.",
+      "propertyNames": {
+        "pattern": "^[A-Z][A-Z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "gateway_tools": {
+      "type": "array",
+      "description": "The tools this pack's agent may hold, as an allowlist of full Gateway names, `<target>___<tool>` (for example `business-operations-case-management___get_case_state`, or `sap-s4___odata_read` on the SAP layer's target). Full names, because the Gateway is shared: a bare `odata_read` would also admit another use case's tool of that name. The deploy refuses a name that is not one of this use case's tools, because an unknown name is dropped from the agent's tool list with no error.",
+      "items": {
+        "type": "string",
+        "pattern": "^(business-operations|sap)-[a-z0-9-]+___[a-z][a-z0-9_]*$"
+      }
+    },
+    "case_document_check": {
+      "type": "object",
+      "description": "Which document a SAP write may touch: each write parameter named here must equal the case key field it maps to, wherever the call names it (a function import's parameters, an update's identifier_fields, a body). The Gateway run checks check it on every SAP write, in every Cedar mode, so a run writes only its own case's document. Fail-closed: a SAP write on a case whose pack declares none is refused, and so is one that omits a checked parameter. Values compare as SAP's ALPHA conversion does (quotes and leading zeros ignored). Each value must be a field of source.key. See docs/reference/threat-model.md.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z][A-Za-z0-9_]*$"
+      }
+    },
+    "write_amount_field": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+      "description": "The write field that holds the amount a SAP write posts (for the supplier invoice service, `InvoiceGrossAmount`). When set, the Gateway run checks hold that amount, read from the call's body, parameters or identifier fields, to the case's amount and to `AUTO_WRITE_LIMIT_USD`, beside the check on the case's own amount: a create or update that omits it, or whose value is not a finite number, is refused. A function import (Release, Cancel) names a posted document's key, not an amount, so it is held to the field only when it carries it. A write the human approved field for field is not re-checked. Unset, the run checks check the case's amount only."
+    },
+    "write_limit_waiver": {
+      "type": "string",
+      "minLength": 20,
+      "description": "Why this pack grants SAP writes with no `AUTO_WRITE_LIMIT_USD` in `constants`. validate_packs.py refuses such a pack unless this says why, because without a limit nothing holds an automatic write to an amount. Not read at run time."
+    },
+    "write_guards": {
+      "type": "array",
+      "description": "Deterministic checks the agent runtime makes against SAP itself before it lets a payment-releasing write through (any write to API_SUPPLIERINVOICE_PROCESS_SRV except Cancel). Declare-to-restrict: a pack that names none is not checked, so a pack that grants SAP writes must name some or declare `write_guards: []`, which says it chose none (validate_packs.py). Each one re-reads SAP and refuses on any read failure. po_reference: the invoice has a purchase-order item. no_duplicate: invoice_matching 1.3's duplicate read finds no other posted invoice, unless the run resumed on an approved duplicate_review ticket naming every match (4.0a). gr_coverage: a PO item that expects a goods receipt has one — any receipt at all, so declare it with within_tolerance_or_approved, which is what grades billing beyond the receipt. within_tolerance_or_approved: price and quantity are within the pack's tolerance constants, or the run resumed on an approval ticket a member of approve_groups decided. See docs/decisions.md.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "po_reference",
+          "no_duplicate",
+          "gr_coverage",
+          "within_tolerance_or_approved"
+        ]
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "model_tier"
+      ],
+      "description": "An independent model asked agree/disagree on every write the write gate classifies as payment-moving (any write to API_SUPPLIERINVOICE_PROCESS_SRV, Cancel included), after every write guard has passed and before the write runs. It sees the SAP rows the guards just read, the proposed call, the SOP clauses the agent cites, the agent's rationale and the ticket the run resumed on. Anything but a clean agree — including a timeout or a model error — refuses the write as `verifier_refused` and the case goes to a human. Absent or `enabled: false` means no verifier. Each call is priced and recorded on the run's trace as `verifier_calls`. See docs/decisions.md.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "model_tier": {
+          "type": "string",
+          "enum": [
+            "haiku",
+            "sonnet",
+            "opus"
+          ],
+          "description": "The checker's model tier, independent of the agent's."
+        },
+        "effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "description": "Sent as `output_config.effort`. Absent means the model default."
+        },
+        "guidance": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "What the checker cannot infer from a generic prompt: what a decision on each of this pack's ticket categories means, and which write executes which outcome. Trusted text from the pack author, shown to the checker unfenced."
+        }
+      }
+    },
+    "process_type_to_sop": {
+      "type": "object",
+      "description": "process_type → the S3 key of its SOP, which MUST be `<this pack>/<file>` and MUST resolve to a file under this pack's sops/ — both checked by validate_packs.py, which is what stops one pack serving another's SOP by naming its key. No process_type may be claimed by two packs; the last glob would win, silently.",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "shared_sops": {
+      "type": "array",
+      "description": "The process_type_to_sop entries whose SOP is shared: another SOP loads it (finance_ops's price and quantity variance SOPs load short_pay after an approver chooses a short payment), triage never chooses it, and it is never recorded as a case's exception_type. Optional: absent, the pack has no shared SOP. Every other entry's kind follows from the files: source.process_type.default is the triage SOP, a key mapping to the same file as another is an alias of it, and the rest are exception SOPs (registry.sop_kinds). Each entry MUST be a process_type_to_sop key, MUST NOT be the triage type or a source.process_type.rules target, MUST NOT be an alias, and MUST appear once, all checked by registry.sop_kind_errors at synth and on every patch and import.",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$"
+      }
+    },
+    "dispositions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$"},
+      "description": "The outcome labels a closed case of this pack may carry, in snake_case. Declared, update_case_state refuses any other label and the agent's prompt lists them; absent, any label is accepted. One label per outcome, so the console and analytics can count them."
+    },
+    "entitlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Who may read this pack's cases, who may approve its writes, who may author its content, and who may set its constants. Declare-to-restrict, so every way of mis-spelling it fails *open* — a misplaced key leaves the pack readable by anyone and the deployment none the wiser. That is why this block is closed. approve_groups must be a subset of groups (validate_packs.py): approval requires read entitlement first.",
+      "properties": {
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": "Cognito groups that may read this pack's cases. Absent means unrestricted."
+        },
+        "approve_groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": "Cognito groups that may approve this pack's SAP writes. Must be a subset of `groups`."
+        },
+        "author_groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": "IdP groups whose members may write this pack's content tier — its display name, description, base prompt and SOPs. Empty or absent means this pack does not restrict authoring beyond the deployment-wide `sop_author_groups` floor. Narrows within that floor; it cannot widen it."
+        },
+        "constant_groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": "IdP groups whose members may set this pack's rule values (`constants` other than the write limits). Held apart from `author_groups` because a tolerance threshold is a business decision with a different reviewer from a prompt change. Same floor and same declare-to-restrict default."
+        },
+        "process_groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": "IdP groups whose members may start the agent on this pack's cases to work them (Process, Start runs). Narrows within the deployment-wide `business-operations-case-workers` group; it cannot widen it. A run passes a SAP write under the pack's auto-write limit for whoever started it, so name people trusted with that. Empty or absent means this pack does not restrict it further."
+        },
+        "limit_groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": "IdP groups whose members may lower this pack's write limits (`AUTO_WRITE_LIMIT_USD`, `DUAL_APPROVAL_LIMIT_USD`) in a stack, with `PUT /packs/{pack_id}/controls`. Narrows within the deployment-wide `business-operations-limit-owners` group; it cannot widen it. Empty or absent means this pack does not restrict it further."
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "short_id",
+        "kind"
+      ],
+      "description": "Where this pack's exceptions come from. A pack with no `source` declares no source, which is legitimate: nothing polls or pushes for it. Published as a sibling of the pack rather than nested inside it, and registry.build() injects `pack_id` here from the directory name — which is why this block does not declare one.",
+      "properties": {
+        "short_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]{1,7}$",
+          "description": "The readable prefix of every case_id this pack mints. No two packs may claim the same one (validate_packs.py) — two packs sharing a prefix make their cases indistinguishable on sight, though the digest still keeps them apart. case_key reads this pattern (through the generated `contracts.py`)."
+        },
+        "label": {
+          "type": "string",
+          "description": "What this source is called on screen, e.g. \"AP invoice exceptions\"."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "filter",
+            "absence",
+            "aging",
+            "event",
+            "comparison",
+            "derived"
+          ],
+          "description": "What makes a record an exception, declared rather than inferred: the same entity and the same filter can mean \"these rows are wrong\" or \"these rows are missing a partner record\", and only the author knows which. The value picks the executor. `filter`, `absence` and `aging` mirror polling_engine.POLLED_KINDS; `event` is pushed. `comparison` and `derived` are named here and rejected by validate_packs.py with the capability they are waiting on, rather than left to fail at 3am in the poller."
+        },
+        "push": {
+          "type": "string",
+          "enum": [
+            "off",
+            "nudge",
+            "records"
+          ],
+          "description": "What a SAP sender may put on its system's ingest queue for this pack (types/sap-nudge.schema.json, types/sap-events.schema.json). `nudge`, the default for a polled kind, sends keys only: the pack's own query is re-read for them, so a nudge can only make the poller's answer arrive sooner. `records` also accepts typed records, which become cases as sent, so the case is only as true as the sender; kind `event` needs it, having no query to re-read. `off` refuses both. Changes by deploy only, like the rest of `source`."
+        },
+        "poll": {
+          "type": "string",
+          "enum": [
+            "schedule",
+            "sweep",
+            "off"
+          ],
+          "description": "Which poller run reads this pack, for kind `filter`, `absence` or `aging` only. `schedule`, the default, is every `pipeline.poller_schedule` run. `sweep` is only the slower `pipeline.sweep_schedule` run, for a pack SAP pushes, so the poll only catches what a sender lost. `off` is never: push only, so a sender that stops loses exceptions with no alarm, and the synth warns. `sweep` and `off` need `push` not `off`. `ops.py poll <pack>` polls any pack."
+        },
+        "service": {
+          "type": "string",
+          "pattern": "^(<AWAITING_SURVEY[^>]*>|[A-Za-z0-9_]+(/[A-Za-z0-9_]+)*)$",
+          "description": "The OData service the poller reads: a V2 service name, or a V4 service's path of the same characters. A pack waiting for its survey holds the marker."
+        },
+        "odata_version": {
+          "type": "string",
+          "enum": ["v2", "v4"],
+          "description": "The service's OData protocol version; absent is `v2`. A `v4` `service` is its whole path under `/sap/opu/odata4/` (`sap/<group>/srvd_a2x/sap/<service>/0001`), an `aging` cutoff is an `Edm.Date` literal, and a child collection is a plain array, so an `iterate.path` or a `field_map` path names it without `.results`."
+        },
+        "entity": {
+          "type": "string",
+          "pattern": "^(<AWAITING_SURVEY[^>]*>|[A-Za-z][A-Za-z0-9_]*)$",
+          "description": "The entity set within that service. A pack waiting for its survey holds the marker."
+        },
+        "filter": {
+          "type": "string",
+          "description": "The $filter that selects exceptions. Read for kind `filter`."
+        },
+        "expand": {
+          "type": "string",
+          "description": "The $expand nav properties. Every name here must also appear in `select`: SAP ANDs the two, so a nav property expanded but not selected is omitted from the response entirely — no error, just no children."
+        },
+        "select": {
+          "type": "string",
+          "description": "The $select field list. Absent means SAP returns everything, children included."
+        },
+        "created_field": {
+          "type": "string",
+          "description": "The record's creation date (a DATS field, e.g. `CreationDate`). Used only when the stack sets `pipeline.poll_created_since`: the poll and the ingest consumer then read only records created on or after that date. Omit for a source with no creation date; such a pack polls its whole backlog."
+        },
+        "aging": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "older_than_days"
+          ],
+          "description": "Read only for kind `aging`. The poller composes the cutoff each poll, so the window moves with the clock instead of going stale in the config the day after it is written.",
+          "properties": {
+            "field": {
+              "type": "string",
+              "description": "The date the clock runs from."
+            },
+            "older_than_days": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "key": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The case's natural key, in order — case_id is a digest of it, and the order is published as an array because DynamoDB does not preserve a map's key order. No two entries may resolve to the same name (validate_packs.py): the second would overwrite the first and shrink the key.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "field"
+            ],
+            "properties": {
+              "field": {
+                "type": "string",
+                "description": "The SAP field name."
+              },
+              "name": {
+                "type": "string",
+                "description": "The name this field takes in the stored `key` map. Defaults to `field`."
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "parent",
+                  "child"
+                ],
+                "description": "Which record the value is read off."
+              },
+              "strip": {
+                "type": "boolean",
+                "description": "Strip SAP's leading zeros."
+              },
+              "fallback": {
+                "type": "string",
+                "description": "Value to use when the field is blank."
+              },
+              "fallback_index": {
+                "type": "boolean",
+                "description": "Fall back to the child's position when the field is blank."
+              },
+              "as": {
+                "type": "string",
+                "description": "Also store the value under this schema attribute. Must be a property of types/cases.schema.json (validate_packs.py)."
+              }
+            }
+          }
+        },
+        "iterate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path"
+          ],
+          "description": "The collection to walk. Carries only the path now: document_number and item_id moved into the `key` list (with `as` if the case should also store them as attributes), and allow_empty_children became `kind` — 'filter' makes a case whether or not the record has children, 'absence' only when it has none. Required for kind `absence`, which means the missing related record *is* the exception.",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The nav property to iterate."
+            }
+          }
+        },
+        "skip_when": {
+          "type": "array",
+          "description": "Records to drop before a case is minted — a blank key field, say, which would otherwise mint a case with no identity. Each entry is a condition polling_engine._eval_skip reads.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op"
+            ],
+            "description": "`field` is read for every op except `and` (which reads `conditions` instead, and never `field`); `value` is read only for `lte`. A schema cannot express that op-conditional presence, so an author can combine them incorrectly here — validate_packs.py does not check it either, because it is not a shape any single pack.json exposes a bug in until run.",
+            "properties": {
+              "field": {
+                "type": "string",
+                "description": "The dotted path to read. Not read for op `and`."
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "blank",
+                  "empty",
+                  "present",
+                  "lte",
+                  "and"
+                ],
+                "description": "Mirrors polling_engine._eval_skip. `and` is compound: it reads `conditions`, not `field`/`value`."
+              },
+              "value": {
+                "type": "number",
+                "description": "The threshold `field` is compared against. Read only for op `lte`."
+              },
+              "conditions": {
+                "type": "array",
+                "description": "Read only for op `and`, which is true only when every one of these is true. _eval_skip recurses on each, so this can nest further than the one level inlined here — validate_packs.py does not check depth beyond it, and neither does this schema.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "op"
+                  ],
+                  "properties": {
+                    "field": {
+                      "type": "string"
+                    },
+                    "op": {
+                      "type": "string",
+                      "enum": [
+                        "blank",
+                        "empty",
+                        "present",
+                        "lte",
+                        "and"
+                      ]
+                    },
+                    "value": {
+                      "type": "number"
+                    },
+                    "conditions": {
+                      "type": "array",
+                      "description": "A further-nested `and` is legal at runtime; this schema stops constraining its shape here.",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "scope": {
+                      "type": "string",
+                      "enum": [
+                        "parent",
+                        "child"
+                      ]
+                    }
+                  }
+                }
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "parent",
+                  "child"
+                ],
+                "description": "Which record `field` is read from. Absent means child, falling back to parent."
+              }
+            }
+          }
+        },
+        "process_type": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "default"
+          ],
+          "description": "Which process_type the cases from this source carry, and so which SOP routes them.",
+          "properties": {
+            "default": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]*$"
+            },
+            "rules": {
+              "type": "array",
+              "description": "Evaluated in order; the first whose `when` matches wins, else `default`. polling_engine._resolve_process_type reuses the skip-condition evaluator for `when` — \"present\" there means the condition is met, the same test skip_when reads as \"drop the record\".",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "when",
+                  "then"
+                ],
+                "properties": {
+                  "when": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "op"
+                    ],
+                    "description": "The same condition shape as a skip_when entry — see its description for the op-conditional presence a schema cannot express.",
+                    "properties": {
+                      "field": {
+                        "type": "string"
+                      },
+                      "op": {
+                        "type": "string",
+                        "enum": [
+                          "blank",
+                          "empty",
+                          "present",
+                          "lte",
+                          "and"
+                        ]
+                      },
+                      "value": {
+                        "type": "number"
+                      },
+                      "conditions": {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      },
+                      "scope": {
+                        "type": "string",
+                        "enum": [
+                          "parent",
+                          "child"
+                        ]
+                      }
+                    }
+                  },
+                  "then": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_]*$",
+                    "description": "The process_type this rule assigns when `when` matches."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "title": {
+          "type": "string",
+          "description": "One line an operator can scan, as a format string over `parent.*`, `child.*` and the derived `abs_amount`."
+        },
+        "field_map": {
+          "type": "object",
+          "description": "attribute name → where its value comes from. These become keys of the case's open `attributes` map, so the name has to survive a JSON key, a DynamoDB expression name, a Python attribute lookup and a humanised UI label — and it must not shadow a WorkItem property, which validate_packs.py checks against types/cases.schema.json. Every attribute here must be declared in `fields`, and every declared field must appear here; both directions fail silently at runtime and differently, so validate_packs.py checks both.",
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "polling_engine._map_fields reads `path`, and the code does not require it (an entry without one maps to null), so this declares no `required`.",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Dotted path from `parent.`, `child.` or `self.`."
+              },
+              "fallback": {
+                "type": "string",
+                "description": "A second dotted path, tried when `path` resolves to null."
+              },
+              "cast": {
+                "type": "string",
+                "enum": [
+                  "abs_decimal",
+                  "sap_date",
+                  "float",
+                  "decimal2"
+                ],
+                "description": "How to coerce the raw SAP value. Mirrors polling_engine._cast; the shipped packs only exercise abs_decimal and sap_date, but float and decimal2 are real casts a pack may use."
+              },
+              "strip": {
+                "type": "boolean",
+                "description": "Strip SAP's leading zeros."
+              },
+              "omit_blank": {
+                "type": "boolean",
+                "description": "Leave the attribute out entirely when the value is blank, rather than writing an empty string."
+              }
+            }
+          }
+        }
+      }
+    },
+    "fields": {
+      "type": "object",
+      "description": "attribute name → what it is called and how it renders. The other half of `field_map`: that says where a value comes from, this says what to do with it. A declared field no field_map writes is a label over a permanent em-dash; an attribute nothing declares reaches the UI as a humanised key with no type. Both are validate_packs.py checks.",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "type"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "The column heading, and the name the agent is shown."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "date",
+              "amount",
+              "decimal"
+            ],
+            "description": "What a renderer can do with the value. One vocabulary, not type + format: every distinction here changes how the value is displayed, and a distinction that does not is a field nobody reads."
+          },
+          "currency_field": {
+            "type": "string",
+            "description": "Required for type `amount` and read for nothing else — a figure rendered without its currency is a number, not money. Must name another field this pack declares (validate_packs.py)."
+          },
+          "panel": {
+            "type": "boolean",
+            "description": "false hides the field from the case detail panel while leaving it available to the agent and the prompt."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "reason"
+            ],
+            "description": "What the attribute means beyond its label, where no label or type can say it. `reason` marks the field holding why the case is an exception, which the handover and the briefing quote per row. At most one field per pack may claim it (validate_packs.py); a pack that declares none falls back to the process_type."
+          }
+        }
+      }
+    },
+    "seed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "inputs",
+        "steps"
+      ],
+      "description": "How `ops.py seed` manufactures one of this pack's exceptions in SAP: the inputs an operator sets, the combinations worth a `--preset`, and the documents to post, in order (`steps`). The seeder (`test_data/`) runs any pack's steps through the SAP layer's write client, so a new pack seeds with no code and no deploy beyond its import; `api/layer/python/seed_steps.py` defines the templates. Real accounting documents, outside the Gateway and its run checks: the seeder is deployed only with `test_data.enabled` and invoked only over IAM. Structure, like every key here but the content keys.",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "What the recipe is called on screen, e.g. \"AP three-way match\"."
+        },
+        "summary": {
+          "type": "string",
+          "description": "One line naming the documents this posts, so an operator knows what is about to be written into SAP before they click."
+        },
+        "company_code": {
+          "type": "string",
+          "pattern": "^[A-Z0-9]{4}$",
+          "description": "The company code the steps post in. A blank `posting_date` becomes the latest date at or before today that this company code has open in SAP for both MM (MARV) and FI (T001B), read over the seeder's own SAP connection through ADT, so only when that connection signs in with Basic; without it, or on a token flow, `posting_date` must be given."
+        },
+        "sap_state": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["service", "entity", "filter"],
+          "description": "Where the eval runner reads SAP's end state for `expected.sap_state` in this pack's evals.json: the record a write would change, which need not be the `source` document. Absent, it reads the `source` document by its key. A GET through the seeder, never a write.",
+          "properties": {
+            "service": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+            "entity": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$"},
+            "filter": {
+              "type": "string",
+              "description": "An OData `$filter` whose `{{expression}}` templates read the case's key fields (seed_steps.py), each quote-escaped. The first matching record is the state."
+            }
+          }
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "description": "What the operator may set. These are the only names a request's `inputs` may carry, and the seeder checks each value against its declaration (`type`, `options`, `min`) before any step runs. An input named `posting_date` (`YYYY-MM-DD`) that is blank becomes the latest date SAP has open for `company_code`.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "label",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$",
+                "description": "The key this value is sent under, and the name a step's template reads it by."
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "number",
+                  "boolean",
+                  "select",
+                  "string"
+                ],
+                "description": "Which control renders. `select` requires `options`."
+              },
+              "default": {
+                "type": [
+                  "number",
+                  "boolean",
+                  "string"
+                ],
+                "description": "What the form starts on. A `number` with no default starts at 0, which most recipes reject."
+              },
+              "min": {
+                "type": "number",
+                "description": "Read for `number` only: the smallest value the seeder accepts."
+              },
+              "hint": {
+                "type": "string",
+                "description": "A few words under the control saying what the value means in SAP."
+              },
+              "options": {
+                "type": "array",
+                "minItems": 1,
+                "description": "Required for `select` and read for nothing else.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "value",
+                    "label"
+                  ],
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "disabled_when": {
+                "type": "string",
+                "description": "The id of a `boolean` input that, when true, makes this one irrelevant: the GR quantity under \"skip the goods receipt\". The value is still sent; a step's `when` decides what is posted."
+              }
+            }
+          }
+        },
+        "presets": {
+          "type": "array",
+          "description": "Named input combinations, one click each. This is where a pack's scenarios live — an AP price variance is AP semantics, not something a generic seeder could offer. Every key in `values` must be a declared input id (validate_packs.py).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "values"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What the scenario is called. Also becomes the scenario name on the created case, so it reads as a label rather than a description."
+              },
+              "values": {
+                "type": "object",
+                "description": "input id → the value this preset sets it to. Partial is fine; unnamed inputs keep what they had.",
+                "propertyNames": {
+                  "pattern": "^[a-z][a-z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "type": [
+                    "number",
+                    "boolean",
+                    "string"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The documents to post, in order, each one OData POST through the SAP layer's write client. Any string in `payload` may hold `{{expression}}` templates: arithmetic, comparison, `and`/`or`/`not`, `a if c else b`, `round(x, n)`, `sap_date(date, days)` and `year(date)`, over the inputs, `posting_date`, and the fields SAP returned for an earlier step (`po.PurchaseOrder`). A string that is one template keeps a boolean's type and drops its key when it is null; anything else renders as text. The first step SAP refuses ends the chain, and its error comes back as `<id>_error` beside what landed. validate_packs.py parses every template at synth.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "service",
+              "entity",
+              "payload"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$",
+                "description": "The name later templates read this step's created document by."
+              },
+              "label": {
+                "type": "string",
+                "description": "What the document is, for a reader."
+              },
+              "when": {
+                "type": "string",
+                "description": "An expression (no braces). False skips the step, and later templates that read it fail."
+              },
+              "service": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]*$",
+                "description": "The OData service, e.g. `API_PURCHASEORDER_PROCESS_SRV`."
+              },
+              "entity": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+                "description": "The entity set POSTed to."
+              },
+              "payload": {
+                "type": "object",
+                "description": "The document, as SAP's OData V2 JSON wants it, with templates."
+              },
+              "returns": {
+                "type": "object",
+                "description": "result key -> the field of SAP's created document reported under it.",
+                "propertyNames": {
+                  "pattern": "^[a-z][a-z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "case": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "key"
+          ],
+          "description": "The case the poller opens for what the steps posted, rendered after the last step: the eval runner writes it before the next poll, so that poll finds the case and skips it. `key` must name exactly the pack's `source.key` fields.",
+          "properties": {
+            "key": {
+              "type": "object",
+              "description": "source.key field -> template.",
+              "additionalProperties": {
+                "type": "string",
+                "description": "A step template: `{{expression}}` over the inputs, earlier steps and `posting_date` (seed_steps.py)."
+              }
+            },
+            "attributes": {
+              "type": "object",
+              "description": "Case attributes the poller's `field_map` would set, as templates.",
+              "additionalProperties": {
+                "type": "string",
+                "description": "A step template: `{{expression}}` over the inputs, earlier steps and `posting_date` (seed_steps.py)."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

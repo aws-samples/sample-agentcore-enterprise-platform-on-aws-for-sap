@@ -1,0 +1,514 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""platform.yaml schema: presets stay valid, and validation accumulates errors.
+
+The whole point of the config file is that a participant learns EVERYTHING
+wrong with their file in one pass, before any AWS call. These tests pin that
+property, plus the cross-field rules that encode real deployment constraints.
+"""
+
+from pathlib import Path
+
+import pytest
+import yaml
+from pydantic import BaseModel, ValidationError
+
+from infra_utils.platform_config import (
+    AGENT_PATTERNS,
+    PlatformConfig,
+    apply_environment_overrides,
+    load_platform_config,
+    resolve_region,
+    to_env,
+)
+
+REPO = Path(__file__).resolve().parents[1]
+PRESETS = sorted((REPO / "presets").glob("*.yaml"))
+
+
+def test_presets_exist():
+    names = {p.stem for p in PRESETS}
+    assert names == {
+        "distributed",
+        "federated",
+        "greenfield",
+        "migration",
+        "multi-agent",
+        "platform-team",
+        "production",
+        "security-focused",
+    }
+
+
+@pytest.mark.parametrize("preset", PRESETS, ids=lambda p: p.stem)
+def test_every_preset_validates(preset):
+    config = load_platform_config(preset)
+    assert config.project
+    assert config.agents.pattern in AGENT_PATTERNS
+
+
+def test_validation_accumulates_errors():
+    """Three problems in, three errors out — not one per deploy cycle."""
+    broken = {
+        "project": "X",  # violates the lowercase pattern
+        "region": "mars-central-1x",  # not a region shape
+        "agents": {"pattern": "skynet"},  # not a pattern
+    }
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate(broken)
+    locs = {e["loc"][0] for e in excinfo.value.errors()}
+    assert {"project", "region", "agents"} <= locs, (
+        f"expected all three errors reported together, got: {excinfo.value.errors()}"
+    )
+
+
+def test_typoed_keys_are_errors_not_noops():
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate({"projcet": "oops"})
+    assert "projcet" in str(excinfo.value)
+
+
+def _models(model, seen):
+    """Every pydantic model reachable from `model`'s fields, nested types included."""
+    if model in seen:
+        return seen
+    seen.add(model)
+    for field in model.model_fields.values():
+        stack = [field.annotation]
+        while stack:
+            tp = stack.pop()
+            if isinstance(tp, type) and issubclass(tp, BaseModel):
+                _models(tp, seen)
+            stack.extend(getattr(tp, "__args__", ()))
+    return seen
+
+
+def test_every_nested_model_refuses_unknown_keys():
+    # A misspelled security key used to load as the insecure default.
+    loose = sorted(
+        m.__name__
+        for m in _models(PlatformConfig, set())
+        if m.model_config.get("extra") != "forbid"
+    )
+    assert not loose, f"models that ignore unknown keys: {loose}"
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate({"security": {"egres_filter": True}})
+    assert "security.egres_filter" in str(excinfo.value)
+
+
+def test_federated_requires_both_account_fields():
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate({"deployment": {"strategy": "federated"}})
+    msg = str(excinfo.value)
+    assert "platform_account" in msg
+
+
+def test_federated_with_accounts_validates():
+    config = PlatformConfig.model_validate(
+        {
+            "deployment": {
+                "strategy": "federated",
+                "platform_account": "111122223333",
+                "workload_accounts": ["444455556666"],
+            }
+        }
+    )
+    assert config.deployment.strategy == "federated"
+
+
+def test_account_ids_must_be_twelve_digits():
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate(
+            {
+                "deployment": {
+                    "strategy": "federated",
+                    "platform_account": "12345",
+                    "workload_accounts": ["not-an-account"],
+                }
+            }
+        )
+    msg = str(excinfo.value)
+    assert "12-digit" in msg
+
+
+def test_traceability_requires_cloudtrail():
+    """Encodes TESTING.md caveat 5: alerting without a trail is silence."""
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate({"security": {"traceability": True}})
+    assert "cloudtrail_alerting" in str(excinfo.value)
+
+
+def test_org_id_valid_and_empty_pass():
+    config = PlatformConfig.model_validate({"security": {"org_id": "o-abc123def456"}})
+    assert config.security.org_id == "o-abc123def456"
+    # Empty stays allowed — deploy.sh prompts for it.
+    assert PlatformConfig.model_validate({}).security.org_id == ""
+
+
+def test_org_id_placeholder_is_rejected_with_a_pointer():
+    """The shipped 'o-REPLACEME' used to validate and render into IAM policies
+    against an organization that does not exist."""
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate({"security": {"org_id": "o-REPLACEME"}})
+    assert "describe-organization" in str(excinfo.value)
+
+
+def test_org_id_wrong_shape_is_rejected():
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate({"security": {"org_id": "not-an-org-id"}})
+    assert "Organizations id" in str(excinfo.value)
+
+
+def test_non_cognito_idp_requires_secret_name():
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate(
+            {"identity": {"idp": "okta", "issuer_url": "https://x.okta.com"}}
+        )
+    assert "client_secret_name" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("mode", "region", "expected"),
+    [
+        ("auto", "us-east-1", True),
+        ("auto", "eu-central-1", False),
+        ("on", "eu-central-1", True),  # explicit on overrides the region gate
+        ("off", "us-east-1", False),
+    ],
+)
+def test_web_search_auto_resolves_by_region(mode, region, expected):
+    config = PlatformConfig.model_validate(
+        {"region": region, "gateway": {"web_search": mode}}
+    )
+    assert config.web_search_enabled is expected
+
+
+@pytest.mark.parametrize(("yaml_value", "expected"), [("on", True), ("off", False)])
+def test_bare_yaml_web_search_values_keep_their_intended_enum(yaml_value, expected):
+    config = PlatformConfig.model_validate(
+        yaml.safe_load(f"gateway:\n  web_search: {yaml_value}\n")
+    )
+    assert config.web_search_enabled is expected
+
+
+def test_project_environment_prefix_fails_before_service_name_limits():
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate(
+            {"project": "agentcore-migration-rehearsal", "environment": "eba"}
+        )
+    message = str(excinfo.value)
+    assert "project/environment prefix" in message
+    assert "at most 30" in message
+    assert "Memory" in message and "Logs" in message
+
+
+def test_defaults_are_a_valid_deployment():
+    """An EMPTY platform.yaml must be deployable (greenfield defaults)."""
+    config = PlatformConfig.model_validate({})
+    assert config.deployment.mode == "workshop"
+    assert config.deployment.strategy == "centralized"
+    assert config.agents.pattern == "orchestrator"
+    assert config.agents.orchestrator_runtime_generation == 1
+    assert config.security.networking is False
+    assert config.observability.transaction_search is True
+
+
+def _production_config() -> dict:
+    return {
+        "deployment": {
+            "mode": "production",
+            "platform_account": "111122223333",
+        },
+        "identity": {
+            "idp": "entra_id",
+            "tenant_id": "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+            "client_id": "9a8b7c6d-1234-4abc-9def-000111222333",
+            "client_secret_name": "agentcore/idp-client-secret",
+        },
+        "agents": {
+            "pattern": "strands-agent",
+            "model_id": "us.anthropic.claude-sonnet-4-6",
+            "allowed_models": ["us.anthropic.claude-sonnet-4-6"],
+        },
+        "gateway": {"web_search": "off"},
+        "security": {
+            "networking": True,
+            "cloudtrail_alerting": True,
+            "resource_policies": True,
+            "egress_filter": True,
+            "require_guardrails": True,
+            "cedar": {"enabled": True, "mode": "ENFORCE"},
+            "traceability": True,
+            "org_id": "o-abc123def456",
+        },
+        "observability": {
+            "transaction_search": True,
+            "alarms": True,
+            "alarm_email": "ops@corp.internal",
+            "log_retention_days": 90,
+        },
+    }
+
+
+def test_production_mode_accepts_a_complete_secure_config():
+    config = PlatformConfig.model_validate(_production_config())
+    assert config.deployment.mode == "production"
+    assert to_env(config)["DEPLOYMENT_MODE"] == "production"
+    assert to_env(config)["LOG_RETENTION_DAYS"] == "90"
+
+
+def test_production_mode_reports_all_missing_controls_together():
+    with pytest.raises(ValidationError) as excinfo:
+        PlatformConfig.model_validate({"deployment": {"mode": "production"}})
+    msg = str(excinfo.value)
+    for field in (
+        "identity.idp",
+        "deployment.platform_account",
+        "security.networking",
+        "security.cloudtrail_alerting",
+        "security.resource_policies",
+        "security.egress_filter",
+        "security.require_guardrails",
+        "security.cedar.enabled",
+        "security.cedar.mode",
+        "security.traceability",
+        "security.org_id",
+        "agents.model_id",
+        "agents.allowed_models",
+        "gateway.web_search",
+        "observability.alarms",
+        "observability.alarm_email",
+    ):
+        assert field in msg
+
+
+def test_environment_override_to_production_is_revalidated():
+    with pytest.raises(ValidationError, match="production controls"):
+        apply_environment_overrides(
+            PlatformConfig.model_validate({}), {"DEPLOYMENT_MODE": "production"}
+        )
+
+
+def test_runtime_generation_is_durable_and_bounded():
+    config = PlatformConfig.model_validate(
+        {"agents": {"orchestrator_runtime_generation": 2}}
+    )
+    assert to_env(config)["ORCHESTRATOR_RUNTIME_GENERATION"] == "2"
+    with pytest.raises(ValidationError):
+        PlatformConfig.model_validate(
+            {"agents": {"orchestrator_runtime_generation": 0}}
+        )
+
+
+def test_effective_design_config_applies_identity_environment_overrides():
+    config = PlatformConfig.model_validate({})
+    effective = apply_environment_overrides(
+        config,
+        {
+            "IDP_TYPE": "entra_id",
+            "IDP_MODE": "brokered",
+            "IDP_TENANT_ID": "11111111-2222-3333-4444-555555555555",
+            "IDP_CLIENT_ID": "client-from-environment",
+            "IDP_CLIENT_SECRET_NAME": "agentcore/idp-client-secret",
+            "PLATFORM_ACCOUNT": "111122223333",
+            "ORCHESTRATOR_RUNTIME_GENERATION": "2",
+        },
+    )
+    assert effective.identity.idp == "entra_id"
+    assert effective.identity.client_id == "client-from-environment"
+    assert effective.agents.orchestrator_runtime_generation == 2
+
+
+def test_effective_design_config_rejects_non_boolean_environment_flag():
+    with pytest.raises(ValueError, match="ENABLE_A2A must be true or false"):
+        apply_environment_overrides(
+            PlatformConfig.model_validate({}), {"ENABLE_A2A": "sometimes"}
+        )
+
+
+def test_secrets_never_belong_in_the_file():
+    """The schema has no field that could hold a secret VALUE — only the
+    Secrets Manager NAME. If someone adds one, this forces the conversation."""
+    field_names = set()
+
+    def walk(model):
+        for name, field in model.model_fields.items():
+            field_names.add(name)
+            annotation = field.annotation
+            if hasattr(annotation, "model_fields"):
+                walk(annotation)
+
+    walk(PlatformConfig)
+    forbidden = {n for n in field_names if "secret" in n and not n.endswith("_name")}
+    assert not forbidden, f"schema fields that could hold secret values: {forbidden}"
+
+
+def test_preset_yaml_matches_schema_dump_roundtrip():
+    """Presets contain no key the schema doesn't know (extra=forbid catches it
+    at load; this asserts the loader is actually exercised on real files)."""
+    for preset in PRESETS:
+        raw = yaml.safe_load(preset.read_text())
+        assert PlatformConfig.model_validate(raw)
+
+
+def test_to_env_maps_onto_the_names_deploy_already_uses():
+    from infra_utils.platform_config import to_env
+
+    env = to_env(load_platform_config(REPO / "presets" / "security-focused.yaml"))
+    assert env["ENABLE_NETWORKING"] == "true"
+    assert env["ENABLE_CEDAR"] == "true"
+    assert env["CEDAR_MODE"] == "LOG_ONLY"
+    assert env["ENABLE_SECURITY"] == "true"  # schema name: cloudtrail_alerting
+    assert env["AGENT_PATTERN"] == "orchestrator"
+    assert "ORG_ID" not in env  # empty in the preset — deploy.sh prompts for it
+    # web_search auto in us-east-1 resolves to on
+    assert env["ENABLE_WEB_SEARCH"] == "true"
+
+
+def test_to_env_omits_empty_values():
+    """Empty strings must not cross the shell boundary: deploy.sh fill-if-unset
+    would treat them as set and skip workshop.env / prompts."""
+    from infra_utils.platform_config import to_env
+
+    env = to_env(PlatformConfig.model_validate({}))
+    assert "MODEL_ID" not in env  # empty = pattern default, not ""
+    assert "IDP_TENANT_ID" not in env
+    assert all(v != "" for v in env.values())
+
+
+def test_app_py_resolves_through_cfg():
+    """Static guard: every legacy `try_get_context(...) or environ.get(...)`
+    lookup in app.py must go through cfg() so platform.yaml participates.
+    The 3LO plaintext-secret rejection loop is the deliberate exception: it
+    probes keys that must NOT resolve (cfg would legitimize them)."""
+    src = (REPO / "app.py").read_text()
+    allowed = (
+        "_vendor",  # the plaintext-rejection loop
+        "platform_config",
+        "region",  # region merges CDK_DEFAULT_REGION explicitly
+        "CDK_DEFAULT_ACCOUNT",
+        "env_key",  # cfg()'s own body
+    )
+    stale = []
+    for i, line in enumerate(src.splitlines(), 1):
+        if (
+            "environ.get(" in line
+            and "cfg(" not in line
+            and not any(a in line or a in src.splitlines()[i - 2] for a in allowed)
+        ):
+            stale.append(f"app.py:{i}: {line.strip()}")
+    assert not stale, (
+        "these app.py lookups bypass cfg() and so ignore platform.yaml:\n"
+        + "\n".join(stale)
+    )
+
+
+# ── Federated strategy (PR C) ──────────────────────────────────────────────
+
+FED = {
+    "deployment": {
+        "strategy": "federated",
+        "platform_account": "111122223333",
+        "workload_accounts": ["444455556666"],
+        "federation": {
+            "gateway_url": "https://example.gateway/mcp",
+            "issuer_url": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_X",
+            "m2m_client_id": "client123",
+            "m2m_client_secret_name": "agentcore/platform-m2m",  # pragma: allowlist secret — a NAME
+        },
+    }
+}
+
+
+def test_federated_role_by_account():
+    config = PlatformConfig.model_validate(FED)
+    assert config.federated_role("111122223333") == "platform"
+    assert config.federated_role("444455556666") == "workload"
+
+
+def test_federated_role_wrong_account_is_a_hard_error():
+    config = PlatformConfig.model_validate(FED)
+    with pytest.raises(ValueError) as excinfo:
+        config.federated_role("999999999999")
+    assert "neither" in str(excinfo.value)
+
+
+def test_federated_role_is_none_for_other_strategies():
+    config = PlatformConfig.model_validate({})
+    assert config.federated_role("111122223333") is None
+
+
+def test_federation_block_completeness_and_derived_discovery():
+    config = PlatformConfig.model_validate(FED)
+    federation = config.deployment.federation
+    assert federation.is_complete
+    assert federation.discovery_url.endswith("/.well-known/openid-configuration")
+    incomplete = PlatformConfig.model_validate(
+        {
+            "deployment": {
+                "strategy": "federated",
+                "platform_account": "111122223333",
+                "workload_accounts": ["444455556666"],
+            }
+        }
+    )
+    assert not incomplete.deployment.federation.is_complete
+
+
+def test_app_gates_stacks_by_federated_role():
+    """Static guard: the stack graph must consult the role. If someone
+    unconditionally re-instantiates auth/gateway (platform-only) or the
+    runtimes (workload-only), federation silently degrades to centralized."""
+    src = (REPO / "app.py").read_text()
+    assert "is_fed_workload" in src and "is_fed_platform" in src
+    assert src.index("federated_role") < src.index("AuthStack(")
+    # auth + gateway skipped in workload accounts
+    assert "if not is_fed_workload:" in src
+    # runtimes skipped in the platform account
+    assert "if not is_fed_platform:" in src
+
+
+# ── resolve_region: every tool reports on the region the deploy used ──
+# Precedence mirrors deploy.sh: env > platform.yaml > workshop.env > profile
+# > us-east-1. The verification tools and monitor.py used to default straight
+# to us-east-1 (usability review, finding 7).
+
+
+@pytest.fixture()
+def region_sandbox(monkeypatch, tmp_path):
+    """No region in env, no AWS profile: only the files in tmp_path speak."""
+    for var in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "PLATFORM_CONFIG"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-aws-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-aws-creds"))
+    return tmp_path
+
+
+def test_resolve_region_env_wins(region_sandbox, monkeypatch):
+    (region_sandbox / "platform.yaml").write_text("region: eu-west-1\n")
+    (region_sandbox / "workshop.env").write_text("AWS_REGION=ap-southeast-1\n")
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    assert resolve_region(root=region_sandbox) == "us-west-2"
+
+
+def test_resolve_region_manifest_beats_workshop_env(region_sandbox):
+    (region_sandbox / "platform.yaml").write_text("region: eu-west-1\n")
+    (region_sandbox / "workshop.env").write_text("AWS_REGION=ap-southeast-1\n")
+    assert resolve_region(root=region_sandbox) == "eu-west-1"
+
+
+def test_resolve_region_reads_workshop_env(region_sandbox):
+    (region_sandbox / "workshop.env").write_text(
+        "# saved answers\nIDP_TYPE=okta\nAWS_REGION=eu-central-1\n"
+    )
+    assert resolve_region(root=region_sandbox) == "eu-central-1"
+
+
+def test_resolve_region_invalid_manifest_falls_through(region_sandbox):
+    (region_sandbox / "platform.yaml").write_text("agents:\n  pattern: skynet\n")
+    (region_sandbox / "workshop.env").write_text("AWS_REGION=eu-central-1\n")
+    assert resolve_region(root=region_sandbox) == "eu-central-1"
+
+
+def test_resolve_region_default_when_nothing_configured(region_sandbox):
+    assert resolve_region(root=region_sandbox) == "us-east-1"

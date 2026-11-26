@@ -1,0 +1,9 @@
+# ASH suppressions for this use case's own files. The rule for a suppression is the
+# root .ash.yaml's; scripts/check-security.sh merges this file in.
+global_settings:
+  suppressions:
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/hello-sap/tests/test_hello-sap.py
+    reason: 'Unit test: the SAP system''s secret_name holds the Secrets Manager NAME placeholder sap/s4
+      in an in-memory config; no value, nothing authenticates.'
+    expiration: '2027-11-01'

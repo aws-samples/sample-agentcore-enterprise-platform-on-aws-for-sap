@@ -1,0 +1,1064 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Runtime Stack — AgentCore Runtime with ECR + CodeBuild pipeline + source hash tracking.
+
+Ports the proven pattern from sample-strands-agent-with-agentcore:
+  ECR repo → S3 source upload → CodeBuild (ARM64) → Build waiter Lambda → CfnRuntime
+
+Source hash tracking ensures:
+  - Container rebuilds only when source code changes
+  - Unchanged source produces no changes on `cdk diff`
+  - ECR images tagged with both `latest` and source hash
+"""
+
+import json
+import os
+import re
+
+import aws_cdk as cdk
+from aws_cdk import (
+    CustomResource,
+)
+from aws_cdk import (
+    aws_bedrock as bedrock,
+)
+from aws_cdk import (
+    aws_bedrockagentcore as agentcore,
+)
+from aws_cdk import (
+    aws_codebuild as codebuild,
+)
+from aws_cdk import (
+    aws_ecr as ecr,
+)
+from aws_cdk import (
+    aws_iam as iam,
+)
+from aws_cdk import (
+    aws_lambda as _lambda,
+)
+from aws_cdk import (
+    aws_logs as logs,
+)
+from aws_cdk import (
+    aws_s3_assets as s3_assets,
+)
+from aws_cdk import (
+    aws_ssm as ssm,
+)
+from constructs import Construct
+
+from infra_utils.guardrail_policy import (
+    baseline_policy,
+    floor_violations,
+    published_version,
+)
+from infra_utils.jwt_authorizer import custom_jwt_authorizer
+from infra_utils.log_retention import log_group, service_log_retention
+from infra_utils.platform_config import allowed_model_resources
+from infra_utils.runtime_network import build_network_config
+from infra_utils.runtime_protocol import (
+    PROTOCOLS,
+    needs_jwt_authorizer,
+    resolve_protocol,
+)
+from infra_utils.source_hash import component_image_tag, compute_source_hash
+
+# Memory actor ids under this prefix belong to use cases; see memory_actor_prefix.
+USE_CASE_ACTOR_PREFIX = "uc-"
+ACTOR_ID_KEY = "bedrock-agentcore:actorId"
+NAMESPACE_KEYS = ("bedrock-agentcore:namespace", "bedrock-agentcore:namespacePath")
+#: Namespaces a platform runtime may not search: a use case's actors, and the actor
+#: stubs that, read as a prefix, would cover them.
+_USE_CASE_ACTOR_STUBS = (
+    f"*/actors/{USE_CASE_ACTOR_PREFIX}*",
+    "*/actors/u",
+    "*/actors/uc",
+)
+
+# Untracked files a lane or a test run leaves behind; in an asset they change
+# its hash, so the next deploy republishes it with no source change.
+ASSET_EXCLUDE = [
+    "__pycache__",
+    "*.pyc",
+    ".DS_Store",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".mypy_cache",
+]
+
+
+def runtime_log_retention(
+    scope: Construct, id: str, runtime_id: str, days: int, retain_data: bool
+) -> logs.LogRetention:
+    """Retention on the log group AgentCore creates for a runtime's DEFAULT endpoint.
+
+    It holds the agent's stdout and, with split telemetry, its otel-rt-logs stream
+    (model prompts, responses and tool payloads).
+    """
+    return service_log_retention(
+        scope,
+        id,
+        cdk.Fn.join("", ["/aws/bedrock-agentcore/runtimes/", runtime_id, "-DEFAULT"]),
+        days,
+        retain_data,
+    )
+
+
+class RuntimeStack(cdk.Stack):
+    """Deploys a single AgentCore Runtime component (orchestrator, a2a_agent, or mcp_server).
+
+    Instantiate multiple times for multi-agent architectures:
+        RuntimeStack(app, "runtime-orchestrator", component_name="orchestrator", runtime_type="orchestrator", ...)
+        RuntimeStack(app, "runtime-code-agent", component_name="code-agent", runtime_type="a2a_agent", ...)
+    """
+
+    def __init__(
+        self,
+        scope: Construct,
+        id: str,
+        *,
+        project_name: str,
+        environment: str,
+        component_name: str,
+        source_dir: str,
+        runtime_type: str = "orchestrator",
+        cognito_issuer_url: str = "",
+        cognito_allowed_clients: list[str] | None = None,
+        allowed_audience: list[str] | None = None,
+        runtime_generation: int = 1,
+        network_mode: str = "PUBLIC",
+        subnet_ids: list[str] | None = None,
+        security_group_ids: list[str] | None = None,
+        extra_env_vars: dict[str, str] | None = None,
+        dockerfile_pattern: str = "",
+        allowed_models: list[str] | None = None,
+        require_guardrails: bool = False,
+        # The baseline guardrail's policy (CloudFormation shape, like
+        # control-library/guardrails/); None = guardrail.egress-default. Used
+        # only when require_guardrails creates the guardrail.
+        guardrail_policy: dict | None = None,
+        # deployment.mode production: the guardrail keeps the platform's floor
+        # (infra_utils/guardrail_policy.py) or the synth fails.
+        guardrail_floor: bool = False,
+        retain_data: bool = False,
+        # Retention on the runtime's own log group (observability.log_retention_days).
+        log_retention_days: int = 30,
+        # Explicit protocol (HTTP, MCP, A2A, AGUI) for a runtime whose build
+        # context is not an agent-code/ pattern; empty = derived as before.
+        protocol: str = "",
+        # Headers allowlisted beyond Authorization (e.g. a delegated-identity
+        # X-Amzn-Bedrock-AgentCore-Runtime-Custom-* header).
+        extra_request_headers: list[str] | None = None,
+        # Token-vault providers this runtime may draw tokens from. Nothing else:
+        # the vault is shared by every runtime in the account.
+        credential_provider_names: list[str] | None = None,
+        # A use case's own Memory actor partition, "uc-<name>:". Set, this
+        # runtime may touch only actor ids under it (and gets it as
+        # MEMORY_ACTOR_PREFIX); unset, it may touch none under "uc-". The
+        # Memory is shared, so this is what keeps one tenant's conversations
+        # out of another's runtime.
+        memory_actor_prefix: str = "",
+        # ── Migration (image-source) mode ──
+        # Set source_image (registry ref) or build_context (local dir) and the
+        # stack builds the migration adapter (migration/adapter/) ON TOP of the
+        # customer's image instead of an agent pattern. Defaults preserve the
+        # pattern path byte-for-byte. See docs in migration/adapter/README.md.
+        source_image: str = "",
+        build_context: str = "",
+        build_dockerfile: str = "Dockerfile",
+        registry_secret_name: str = "",
+        adapter_dir: str = "",
+        migration_env: dict[str, str] | None = None,
+        migration_secret_names: list[str] | None = None,
+        migration_port: str = "",
+        migration_invoke_path: str = "",
+        migration_health_path: str = "",
+        **kwargs,
+    ):
+        super().__init__(scope, id, **kwargs)
+
+        migration_mode = bool(source_image or build_context)
+        if memory_actor_prefix and not re.fullmatch(
+            rf"{USE_CASE_ACTOR_PREFIX}[a-z0-9-]+:", memory_actor_prefix
+        ):
+            raise ValueError(
+                f"memory_actor_prefix must be {USE_CASE_ACTOR_PREFIX}<name>:, "
+                f"got {memory_actor_prefix!r}"
+            )
+
+        prefix = f"{project_name}-{environment}"
+        # AgentCore names must use underscores, not hyphens
+        rt_name = f"{project_name}_{environment}_{component_name}".replace("-", "_")
+        if runtime_generation > 1:
+            rt_name = f"{rt_name}_g{runtime_generation}"
+
+        # Resolve absolute source path
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        abs_source_dir = os.path.join(repo_root, source_dir)
+
+        # ── Source Hash ──
+        if migration_mode:
+            # Adapter content + what it wraps. For a registry image the STRING
+            # is hashed, so a re-push of the same tag upstream is not detected
+            # — pin a digest (image@sha256:…) or bump the tag to force a
+            # rebuild. Building from source hashes the context's contents.
+            abs_adapter_dir = os.path.join(repo_root, adapter_dir)
+            abs_context_dir = (
+                os.path.join(repo_root, build_context) if build_context else ""
+            )
+            variant = (
+                f"{compute_source_hash(abs_context_dir)}:{build_dockerfile}"
+                if build_context
+                else source_image
+            )
+            source_hash = component_image_tag(abs_adapter_dir, variant)
+        else:
+            source_hash = component_image_tag(abs_source_dir, dockerfile_pattern)
+        image_tag = source_hash
+
+        # ── ECR Repository ──
+        repo = ecr.Repository(
+            self,
+            "ECR",
+            repository_name=f"{prefix}-{component_name}",
+            removal_policy=(
+                cdk.RemovalPolicy.RETAIN if retain_data else cdk.RemovalPolicy.DESTROY
+            ),
+            empty_on_delete=not retain_data,
+            # Scan every pushed image: the agent images pull in a large Python
+            # dependency tree, and this is the only automatic signal that a base
+            # image or package has a known CVE (Checkov CKV_AWS_163).
+            image_scan_on_push=True,
+            # NOT setting encryption=KMS here, deliberately. ECR encryption is
+            # immutable, so changing it requires replacing the repository, and
+            # CloudFormation refuses to replace a resource with an explicit
+            # repository_name ("cannot update a stack when a custom-named
+            # resource requires replacing"). Verified: it rolls the stack back.
+            # Retrofitting it therefore costs either the predictable repo name
+            # that docs and scripts rely on, or a destroy/redeploy of every
+            # runtime stack — a migration decision, tracked separately
+            # (Checkov CKV_AWS_136). Repositories are encrypted with AES256 by
+            # default in the meantime.
+            lifecycle_rules=[
+                ecr.LifecycleRule(max_image_count=10, description="Keep last 10 images")
+            ],
+        )
+
+        # ── S3 Source Asset ──
+        context_asset = None
+        if migration_mode:
+            # The "source" CodeBuild sees is the adapter dir; the customer's
+            # build context (when building from source) rides along separately.
+            source_asset = s3_assets.Asset(
+                self, "SourceAsset", path=abs_adapter_dir, exclude=ASSET_EXCLUDE
+            )
+            if build_context:
+                context_asset = s3_assets.Asset(
+                    self, "ContextAsset", path=abs_context_dir
+                )
+        elif os.path.isdir(abs_source_dir):
+            source_asset = s3_assets.Asset(
+                self, "SourceAsset", path=abs_source_dir, exclude=ASSET_EXCLUDE
+            )
+        else:
+            # Create a minimal placeholder so synth doesn't fail without agent code
+            placeholder_dir = os.path.join(repo_root, ".cdk-placeholder")
+            os.makedirs(placeholder_dir, exist_ok=True)
+            placeholder_dockerfile = os.path.join(placeholder_dir, "Dockerfile")
+            if not os.path.exists(placeholder_dockerfile):
+                with open(placeholder_dockerfile, "w") as f:
+                    f.write(
+                        'FROM public.ecr.aws/docker/library/python:3.11-slim\nCMD ["echo","placeholder"]\n'
+                    )
+            source_asset = s3_assets.Asset(self, "SourceAsset", path=placeholder_dir)
+
+        # ── CodeBuild Project (ARM64, privileged for Docker) ──
+        docker_build_cmd = (
+            "docker build --platform linux/arm64 -t $REPO_URI:$IMAGE_TAG ."
+        )
+        if dockerfile_pattern:
+            docker_build_cmd = f"docker build --platform linux/arm64 -f {dockerfile_pattern}/Dockerfile -t $REPO_URI:$IMAGE_TAG ."
+
+        if migration_mode:
+            phases = self._migration_build_phases(
+                build_context=build_context,
+                build_dockerfile=build_dockerfile,
+                registry_secret_name=registry_secret_name,
+            )
+        else:
+            phases = {
+                "pre_build": {
+                    "commands": [
+                        "echo Logging in to Amazon ECR...",
+                        (
+                            "aws ecr get-login-password --region $AWS_DEFAULT_REGION | "
+                            "docker login --username AWS --password-stdin "
+                            "$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+                        ),
+                        "echo Downloading source from S3...",
+                        "aws s3 cp $SOURCE_S3_URI source.zip",
+                        "mkdir -p source && unzip -o source.zip -d source/",
+                    ],
+                },
+                "build": {
+                    "commands": [
+                        "cd source/",
+                        docker_build_cmd,
+                        "docker tag $REPO_URI:$IMAGE_TAG $REPO_URI:latest",
+                    ],
+                },
+                "post_build": {
+                    "commands": [
+                        "echo Pushing image to ECR...",
+                        "docker push $REPO_URI:$IMAGE_TAG",
+                        "docker push $REPO_URI:latest",
+                        "echo Build completed on `date`",
+                    ],
+                },
+            }
+
+        build_project = codebuild.Project(
+            self,
+            "Build",
+            project_name=f"{prefix}-build-{component_name}",
+            description=f"Build container for {component_name}",
+            environment=codebuild.BuildEnvironment(
+                build_image=codebuild.LinuxArmBuildImage.AMAZON_LINUX_2_STANDARD_3_0,
+                privileged=True,
+                compute_type=codebuild.ComputeType.SMALL,
+            ),
+            timeout=cdk.Duration.minutes(30),
+            build_spec=codebuild.BuildSpec.from_object(
+                {
+                    "version": "0.2",
+                    "phases": phases,
+                }
+            ),
+        )
+        # CodeBuild creates /aws/codebuild/<project> on the first build, outside the
+        # stack, with no retention.
+        service_log_retention(
+            self,
+            "BuildLogRetention",
+            f"/aws/codebuild/{prefix}-build-{component_name}",
+            log_retention_days,
+            retain_data,
+        )
+        repo.grant_push(build_project)
+        source_asset.grant_read(build_project)
+        if context_asset:
+            context_asset.grant_read(build_project)
+        if migration_mode and registry_secret_name:
+            # Only CodeBuild pulls from the customer's registry, and only when
+            # a secret was declared. Secrets Manager appends a random 6-char
+            # suffix to secret ARNs, hence the -* (same shape as the token-vault
+            # statement on the runtime role).
+            build_project.add_to_role_policy(
+                iam.PolicyStatement(
+                    sid="MigrationRegistrySecret",
+                    actions=["secretsmanager:GetSecretValue"],
+                    resources=[
+                        self.format_arn(
+                            service="secretsmanager",
+                            resource="secret",
+                            resource_name=f"{registry_secret_name}-*",
+                            arn_format=cdk.ArnFormat.COLON_RESOURCE_NAME,
+                        )
+                    ],
+                )
+            )
+
+        # ── Build Trigger Lambda (Custom Resource) ──
+        trigger_fn = _lambda.Function(
+            self,
+            "BuildTrigger",
+            function_name=f"{prefix}-build-trigger-{component_name}",
+            runtime=_lambda.Runtime.PYTHON_3_13,
+            handler="build_trigger_lambda.handler",
+            code=_lambda.Code.from_asset(
+                # Only the handler ships, so an edit elsewhere in infra_utils
+                # does not redeploy every runtime stack's trigger.
+                os.path.join(repo_root, "infra_utils"),
+                exclude=["*", "!build_trigger_lambda.py"],
+            ),
+            timeout=cdk.Duration.minutes(15),
+            memory_size=256,
+            # The custom resource invokes this function on the stack's Delete, so its
+            # last lines can arrive after the group is deleted and Lambda recreates
+            # it. With /aws/lambda/<fixed name> that orphan blocks the next deploy;
+            # a group with a generated name never collides with its successor.
+            log_group=log_group(
+                self, "BuildTriggerLogs", log_retention_days, retain_data
+            ),
+        )
+        trigger_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
+                resources=[build_project.project_arn],
+            )
+        )
+
+        env_overrides = [
+            {
+                "name": "SOURCE_S3_URI",
+                "value": source_asset.s3_object_url,
+                "type": "PLAINTEXT",
+            },
+            {"name": "IMAGE_TAG", "value": image_tag, "type": "PLAINTEXT"},
+            {
+                "name": "REPO_URI",
+                "value": repo.repository_uri,
+                "type": "PLAINTEXT",
+            },
+            {"name": "ACCOUNT_ID", "value": self.account, "type": "PLAINTEXT"},
+        ]
+        if source_image:
+            env_overrides.append(
+                {"name": "SOURCE_IMAGE", "value": source_image, "type": "PLAINTEXT"}
+            )
+        if context_asset:
+            env_overrides.append(
+                {
+                    "name": "CONTEXT_S3_URI",
+                    "value": context_asset.s3_object_url,
+                    "type": "PLAINTEXT",
+                }
+            )
+        if migration_mode and registry_secret_name:
+            env_overrides.append(
+                {
+                    "name": "REGISTRY_SECRET_NAME",
+                    "value": registry_secret_name,
+                    "type": "PLAINTEXT",
+                }
+            )
+
+        # Custom resource triggers build only when source hash changes
+        build_trigger = CustomResource(
+            self,
+            "BuildTriggerCR",
+            service_token=trigger_fn.function_arn,
+            properties={
+                "ProjectName": build_project.project_name,
+                "EnvironmentOverrides": env_overrides,
+                # Source hash change triggers rebuild
+                "SourceHash": source_hash,
+            },
+        )
+
+        # ── Optional: baseline Bedrock Guardrail (guardrailed-only inference) ──
+        # Same control-library artifact the gateway's egress filter uses: PII +
+        # prompt-injection content filtering is equally valid at the inference
+        # boundary. A runtime may bring its own policy instead.
+        guardrail = None
+        if require_guardrails:
+            guardrail_cfg = guardrail_policy or baseline_policy(
+                floor=guardrail_floor, runtime=True
+            )
+            missing = floor_violations(guardrail_cfg) if guardrail_floor else []
+            if missing:
+                raise ValueError(
+                    f"{component_name}'s guardrail policy drops the production "
+                    f"floor: it needs {', '.join(missing)}"
+                )
+            guardrail = bedrock.CfnGuardrail(
+                self,
+                "BaselineGuardrail",
+                # Bedrock caps a guardrail name at 50; a longer one never deployed.
+                name=f"{prefix}-{component_name}-guardrail"[:50],
+                description=f"Baseline inference guardrail for {component_name}.",
+                blocked_input_messaging=guardrail_cfg["BlockedInputMessaging"],
+                blocked_outputs_messaging=guardrail_cfg["BlockedOutputsMessaging"],
+            )
+            # Policy blocks come straight from the control-library artifact (CFN shape).
+            for cfn_key in (
+                "ContentPolicyConfig",
+                "SensitiveInformationPolicyConfig",
+                "TopicPolicyConfig",
+                "WordPolicyConfig",
+                "ContextualGroundingPolicyConfig",
+            ):
+                if cfn_key in guardrail_cfg:
+                    guardrail.add_property_override(cfn_key, guardrail_cfg[cfn_key])
+
+        # ── AgentCore Runtime IAM Role ──
+        runtime_role = iam.Role(
+            self,
+            "RuntimeRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            role_name=f"{prefix}-{component_name}-runtime-role",
+        )
+        self._runtime_role = runtime_role
+        self._attach_runtime_permissions(
+            runtime_role,
+            repo.repository_arn,
+            project_name=project_name,
+            allowed_models=allowed_models,
+            guardrail=guardrail,
+            runtime_name=rt_name,
+            runtime_prefix=f"{project_name}_{environment}_".replace("-", "_"),
+            credential_provider_names=credential_provider_names,
+            memory_actor_prefix=memory_actor_prefix,
+        )
+        if migration_secret_names:
+            # The adapter resolves each declared migration secret into the
+            # child's env at startup — exactly these, nothing else. Same -*
+            # suffix shape as the token-vault statement below.
+            runtime_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="MigrationSecrets",
+                    actions=["secretsmanager:GetSecretValue"],
+                    resources=[
+                        self.format_arn(
+                            service="secretsmanager",
+                            resource="secret",
+                            resource_name=f"{project_name}/{environment}/migration/{name}-*",
+                            arn_format=cdk.ArnFormat.COLON_RESOURCE_NAME,
+                        )
+                        for name in migration_secret_names
+                    ],
+                )
+            )
+
+        # ── Protocol Configuration ──
+        if protocol and protocol not in PROTOCOLS:
+            raise ValueError(f"protocol must be one of {PROTOCOLS}, got {protocol!r}")
+        protocol = protocol or resolve_protocol(runtime_type, dockerfile_pattern)
+
+        # ── Environment Variables ──
+        env_vars: dict[str, str] = {
+            "PROJECT_NAME": project_name,
+            "ENVIRONMENT": environment,
+            "COMPONENT_NAME": component_name,
+            "AWS_REGION_NAME": self.region,
+            "SOURCE_HASH": source_hash,
+        }
+        if memory_actor_prefix:
+            env_vars["MEMORY_ACTOR_PREFIX"] = memory_actor_prefix
+        # Guardrail injection sits BEFORE the extra_env_vars merge so an explicit
+        # override wins. Agents attach the guardrail when GUARDRAIL_ID is present
+        # (the IAM deny below is what makes skipping it fail, not convention).
+        if guardrail is not None:
+            env_vars["GUARDRAIL_ID"] = guardrail.attr_guardrail_id
+            env_vars["GUARDRAIL_VERSION"] = published_version(
+                guardrail, guardrail_cfg
+            ).attr_version
+        # Migration adapter contract (migration/adapter/adapter.py), also
+        # before the extra_env_vars merge so an explicit override wins.
+        # ADAPTER_CHILD_CMD is baked into the image at build time, not set here.
+        if migration_mode:
+            env_vars["MIGRATION_PORT"] = migration_port or "8000"
+            env_vars["MIGRATION_INVOKE_PATH"] = migration_invoke_path or "/invocations"
+            # Omitted rather than set empty when the customer declared no health
+            # path: the adapter reads absent and empty identically ("any HTTP
+            # response proves the child is up"), and an empty environment value
+            # is exactly the kind of input an L1 control plane rejects at deploy
+            # time. Same convention as MODEL_ID.
+            if migration_health_path:
+                env_vars["MIGRATION_HEALTH_PATH"] = migration_health_path
+            if migration_env:
+                env_vars["MIGRATION_ENV_JSON"] = json.dumps(
+                    migration_env, separators=(",", ":"), sort_keys=True
+                )
+            if migration_secret_names:
+                env_vars["MIGRATION_SECRETS"] = ",".join(migration_secret_names)
+        env_vars.update(extra_env_vars or {})
+
+        # ── Network Configuration ──
+        # Shape and fail-fast rules live in infra_utils so they are testable
+        # without CDK (tests/test_runtime_network.py).
+        network_config = build_network_config(
+            network_mode, subnet_ids, security_group_ids
+        )
+
+        # ── CfnRuntime ──
+        runtime_props: dict = {
+            "agent_runtime_name": rt_name,
+            "role_arn": runtime_role.role_arn,
+            "agent_runtime_artifact": {
+                "containerConfiguration": {
+                    "containerUri": f"{repo.repository_uri}:{image_tag}",
+                },
+            },
+            "network_configuration": network_config,
+            "protocol_configuration": protocol,
+            "environment_variables": env_vars,
+        }
+
+        # CUSTOM_JWT auth for client-facing protocols (HTTP, MCP, AGUI), plus the
+        # Authorization header allowlist so agents can read JWT claims
+        # (agent-code/shared/auth.py) — without it context.request_headers is
+        # empty and every JWT-consuming pattern fails at invoke time. The two are
+        # deliberately gated TOGETHER: the control plane rejects an Authorization
+        # allowlist on a runtime without customJWTAuthorizer ("Authorization
+        # header can be specified in requestHeaderAllowlist only when runtime is
+        # set up with customJWTAuthorizer", observed live on an A2A deploy). So
+        # an authorizer-less runtime (A2A, or built without an issuer) cannot
+        # forward Authorization at all — its agent must not require a caller JWT.
+        # Docs: "Propagate a JWT token to AgentCore Runtime" (runtime-oauth) +
+        # runtime-header-allowlist.
+        header_allowlist = list(extra_request_headers or [])
+        if needs_jwt_authorizer(protocol) and cognito_issuer_url:
+            runtime_props["authorizer_configuration"] = custom_jwt_authorizer(
+                cognito_issuer_url, cognito_allowed_clients, allowed_audience
+            )
+            header_allowlist.insert(0, "Authorization")
+        if header_allowlist:
+            runtime_props["request_header_configuration"] = {
+                "requestHeaderAllowlist": header_allowlist,
+            }
+
+        self._runtime = agentcore.CfnRuntime(self, "Runtime", **runtime_props)
+        self._runtime.node.add_dependency(build_trigger)
+        runtime_log_retention(
+            self,
+            "RuntimeLogRetention",
+            self._runtime.attr_agent_runtime_id,
+            log_retention_days,
+            retain_data,
+        )
+
+        # ── SSM Parameters ──
+        ssm.StringParameter(
+            self,
+            "SSMRuntimeArn",
+            parameter_name=f"/{project_name}/{environment}/runtimes/{component_name}/arn",
+            string_value=self._runtime.attr_agent_runtime_arn,
+        )
+        ssm.StringParameter(
+            self,
+            "SSMRuntimeId",
+            parameter_name=f"/{project_name}/{environment}/runtimes/{component_name}/id",
+            string_value=self._runtime.attr_agent_runtime_id,
+        )
+
+        # ── Outputs ──
+        cdk.CfnOutput(
+            self,
+            "RuntimeArn",
+            value=self._runtime.attr_agent_runtime_arn,
+            export_name=f"{prefix}-{component_name}-runtime-arn",
+        )
+        cdk.CfnOutput(self, "RuntimeId", value=self._runtime.attr_agent_runtime_id)
+        cdk.CfnOutput(self, "SourceHash", value=source_hash)
+        cdk.CfnOutput(self, "ImageUri", value=f"{repo.repository_uri}:{image_tag}")
+
+    @staticmethod
+    def _migration_build_phases(
+        *,
+        build_context: str,
+        build_dockerfile: str,
+        registry_secret_name: str,
+    ) -> dict:
+        """Buildspec phases for migration mode: obtain the customer's image
+        (registry pull or local source build, always linux/arm64 — AgentCore
+        Runtime accepts nothing else), capture its Entrypoint+Cmd, and build
+        the adapter (migration/adapter/) on top.
+
+        CodeBuild runs every command in one shell session, so variables set in
+        one command (SOURCE_IMAGE, CHILD_CMD) are visible to the next.
+        """
+        pre_build = [
+            "echo Logging in to Amazon ECR...",
+            (
+                "aws ecr get-login-password --region $AWS_DEFAULT_REGION | "
+                "docker login --username AWS --password-stdin "
+                "$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+            ),
+            "echo Downloading adapter from S3...",
+            "aws s3 cp $SOURCE_S3_URI adapter.zip",
+            "mkdir -p adapter && unzip -o adapter.zip -d adapter/",
+        ]
+        if build_context:
+            pre_build += [
+                "echo Downloading customer build context from S3...",
+                "aws s3 cp $CONTEXT_S3_URI context.zip",
+                "mkdir -p context && unzip -o context.zip -d context/",
+            ]
+        if registry_secret_name:
+            # Secret JSON shape: {"username": "...", "password": "...",
+            # "server": "registry.example.com"} — documented in
+            # migration/adapter/README.md and the migration preset.
+            pre_build += [
+                "echo Logging in to the source registry...",
+                (
+                    'REGISTRY_CREDS=$(aws secretsmanager get-secret-value --secret-id "$REGISTRY_SECRET_NAME" '
+                    "--query SecretString --output text)"
+                ),
+                (
+                    'echo "$REGISTRY_CREDS" | jq -r .password | docker login '
+                    '--username "$(echo "$REGISTRY_CREDS" | jq -r .username)" '
+                    '--password-stdin "$(echo "$REGISTRY_CREDS" | jq -r .server)"'
+                ),
+            ]
+
+        if build_context:
+            build = [
+                'echo "Building customer image from source (linux/arm64)..."',
+                (
+                    f"docker build --platform linux/arm64 -f context/{build_dockerfile} "
+                    "-t migration-source:local context/"
+                ),
+                "SOURCE_IMAGE=migration-source:local",
+            ]
+        else:
+            build = [
+                'echo "Pulling source image $SOURCE_IMAGE (linux/arm64)..."',
+                (
+                    'docker pull --platform linux/arm64 "$SOURCE_IMAGE" || '
+                    '{ echo "ERROR: no linux/arm64 image available for $SOURCE_IMAGE - '
+                    "AgentCore Runtime is arm64-only. Supply the Docker build "
+                    "context with migration.source.build so CodeBuild can "
+                    'produce an arm64 image."; exit 1; }'
+                ),
+            ]
+        build += [
+            # The source image's own command, as one JSON array, becomes the
+            # adapter's child process (ADAPTER_CHILD_CMD, baked as ENV).
+            (
+                'CHILD_CMD=$(docker inspect "$SOURCE_IMAGE" | python3 -c \'import json,sys; '
+                'c=json.load(sys.stdin)[0]["Config"]; '
+                'print(json.dumps((c.get("Entrypoint") or [])+(c.get("Cmd") or [])))\')'
+            ),
+            # Preserve the source image's USER after the adapter dependencies
+            # have been installed as root. Empty Config.User means Docker's
+            # default root user.
+            (
+                'SOURCE_USER=$(docker inspect "$SOURCE_IMAGE" | python3 -c \'import json,sys; '
+                'print(json.load(sys.stdin)[0]["Config"].get("User") or "root")\')'
+            ),
+            'echo "Preserving source runtime user: $SOURCE_USER"',
+            (
+                'docker build --platform linux/arm64 --build-arg SOURCE_IMAGE="$SOURCE_IMAGE" '
+                '--build-arg CHILD_CMD="$CHILD_CMD" '
+                '--build-arg CHILD_USER="$SOURCE_USER" '
+                "-f adapter/Dockerfile -t $REPO_URI:$IMAGE_TAG adapter/"
+            ),
+            "docker tag $REPO_URI:$IMAGE_TAG $REPO_URI:latest",
+        ]
+        return {
+            "pre_build": {"commands": pre_build},
+            "build": {"commands": build},
+            "post_build": {
+                "commands": [
+                    "echo Pushing image to ECR...",
+                    "docker push $REPO_URI:$IMAGE_TAG",
+                    "docker push $REPO_URI:latest",
+                    "echo Build completed on `date`",
+                ],
+            },
+        }
+
+    @property
+    def runtime_role(self) -> iam.Role:
+        """The execution role, for a use case to add grants on its own resources."""
+        return self._runtime_role
+
+    @property
+    def runtime(self) -> agentcore.CfnRuntime:
+        """The CfnRuntime, for property overrides no constructor argument covers."""
+        return self._runtime
+
+    @property
+    def runtime_arn(self) -> str:
+        return self._runtime.attr_agent_runtime_arn
+
+    @property
+    def runtime_id(self) -> str:
+        return self._runtime.attr_agent_runtime_id
+
+    @staticmethod
+    def _attach_runtime_permissions(
+        role: iam.Role,
+        ecr_repo_arn: str,
+        *,
+        project_name: str,
+        allowed_models: list[str] | None = None,
+        guardrail: bedrock.CfnGuardrail | None = None,
+        runtime_name: str = "",
+        runtime_prefix: str = "",
+        credential_provider_names: list[str] | None = None,
+        memory_actor_prefix: str = "",
+    ) -> None:
+        """Attach the standard AgentCore Runtime permissions to a role.
+
+        Wildcard resources are used only where the AWS action does not support
+        resource-level permissions; each one says so. Everything that can be
+        scoped is scoped, because this role is what a compromised agent inherits.
+        """
+        stack = cdk.Stack.of(role)
+
+        def arn(resource: str) -> str:
+            return f"arn:{stack.partition}:bedrock-agentcore:{stack.region}:{stack.account}:{resource}"
+
+        workload_identity = [
+            arn("workload-identity-directory/default"),
+            arn(
+                f"workload-identity-directory/default/workload-identity/{runtime_name}-*"
+            ),
+        ]
+        statements = [
+            # ECR image pull, limited to this component's own repository. It used
+            # to be resources=["*"], which let any runtime role pull every image
+            # in the account (Checkov CKV_AWS_108) — the repo ARN was already
+            # being passed to this function and simply ignored.
+            iam.PolicyStatement(
+                sid="ECRPull",
+                actions=["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+                resources=[ecr_repo_arn],
+            ),
+            # GetAuthorizationToken has no resource to scope to: it returns an
+            # account-level token, so IAM only accepts "*".
+            iam.PolicyStatement(
+                sid="ECRAuth",
+                actions=["ecr:GetAuthorizationToken"],
+                resources=["*"],
+            ),
+            # CloudWatch Logs. PutResourcePolicy is what lets AgentCore allow
+            # X-Ray to deliver this agent's spans into the agent's own log group
+            # (the unified span destination) instead of the shared aws/spans
+            # group. Kept scoped to the runtime log groups: account-wide it would
+            # let the agent open any log group to another account.
+            iam.PolicyStatement(
+                sid="CloudWatchLogs",
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:PutResourcePolicy",
+                ],
+                resources=[
+                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*"
+                ],
+            ),
+            # X-Ray tracing. These two actions accept no resource ARN, so "*" is
+            # the only valid value — not a missed scoping opportunity.
+            iam.PolicyStatement(
+                sid="XRayTracing",
+                actions=["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+                resources=["*"],
+            ),
+            # CloudWatch metrics. PutMetricData also takes no resource ARN; the
+            # namespace condition is what constrains it instead.
+            iam.PolicyStatement(
+                sid="CloudWatchMetrics",
+                actions=["cloudwatch:PutMetricData"],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {"cloudwatch:namespace": "bedrock-agentcore"}
+                },
+            ),
+            # Bedrock model invocation. Wildcard by default (any model the
+            # account has access to — the workshop default); scoped to the
+            # platform.yaml allow-list when one is set, so the role is the
+            # enforcement point even against the containers' baked-in default
+            # model ids.
+            iam.PolicyStatement(
+                sid="BedrockModels",
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "bedrock:Converse",
+                    "bedrock:ConverseStream",
+                ],
+                resources=(
+                    allowed_model_resources(allowed_models)
+                    if allowed_models
+                    else [
+                        "arn:aws:bedrock:*::foundation-model/*",
+                        "arn:aws:bedrock:*:*:inference-profile/*",
+                    ]
+                ),
+            ),
+            # SSM Parameter Store (cross-stack discovery), scoped to this
+            # project's own parameter path. On "*" the agent could read every
+            # parameter in the account, which is the classic data-exfiltration
+            # path Checkov CKV_AWS_108 looks for. infra_utils/agentcore_role.py
+            # — the file that calls itself the reference policy — already scoped
+            # these actions this way; this makes the two agree.
+            iam.PolicyStatement(
+                sid="SSMAccess",
+                actions=["ssm:GetParameter", "ssm:GetParameters"],
+                resources=[f"arn:aws:ssm:*:*:parameter/{project_name}/*"],
+            ),
+            # A2A delegation: this project-environment's own runtimes only, which
+            # RuntimeStack names {project}_{environment}_<component>. On "*" any
+            # runtime role could invoke every SigV4 runtime in the account, a
+            # use case's tool server behind the Gateway included, and skip the
+            # Gateway's policy and interceptor on the way. The wildcard also
+            # covers each runtime's endpoints (runtime/<id>/runtime-endpoint/...).
+            iam.PolicyStatement(
+                sid="AgentCoreInvokeOwnRuntimes",
+                actions=["bedrock-agentcore:InvokeAgentRuntime"],
+                resources=[arn(f"runtime/{runtime_prefix or runtime_name}*")],
+            ),
+            # AgentCore service access (Gateway, Memory, Registry, etc.).
+            # Still "*", and knowingly so: scoping these needs the gateway and
+            # memory ARNs. Tracked as its own task rather than rushed here,
+            # because getting it wrong breaks every live-verified path
+            # (gateway tools, memory).
+            iam.PolicyStatement(
+                sid="AgentCoreAccess",
+                actions=[
+                    "bedrock-agentcore:InvokeGateway",
+                    "bedrock-agentcore:GetGateway",
+                    "bedrock-agentcore:ListGateways",
+                    "bedrock-agentcore:StartBrowserSession",
+                    "bedrock-agentcore:StopBrowserSession",
+                    "bedrock-agentcore:ConnectBrowserAutomationStream",
+                ],
+                resources=["*"],
+            ),
+            # Memory events, partitioned by actor id: the Memory is shared by
+            # every runtime in the deployment. ListEvents/ListSessions/DeleteEvent
+            # are required by the framework memory integrations (e.g. LangGraph's
+            # AgentCoreMemorySaver checkpointer lists events to rehydrate a
+            # thread); without them memory-backed patterns fail at invoke. Every
+            # one of these actions carries bedrock-agentcore:actorId and takes the
+            # memory resource type, so it is held to this deployment's Memory as the
+            # records are: another deployment's Memory in the account is not ours.
+            iam.PolicyStatement(
+                sid="AgentCoreMemoryEvents",
+                actions=[
+                    "bedrock-agentcore:CreateEvent",
+                    "bedrock-agentcore:GetEvent",
+                    "bedrock-agentcore:ListEvents",
+                    "bedrock-agentcore:DeleteEvent",
+                    "bedrock-agentcore:ListSessions",
+                ],
+                resources=[arn(f"memory/{runtime_prefix}memory-*")],
+                conditions=(
+                    {"StringLike": {ACTOR_ID_KEY: f"{memory_actor_prefix}*"}}
+                    if memory_actor_prefix
+                    else {"StringNotLike": {ACTOR_ID_KEY: f"{USE_CASE_ACTOR_PREFIX}*"}}
+                ),
+            ),
+            # Memory records. RetrieveMemoryRecords carries no actorId, only the
+            # namespace it searches, so the partition is held on the namespace:
+            # the strategies' namespaces embed the actor (stacks/memory_stack.py).
+            # Each key is checked when present; the API takes one. A platform
+            # runtime's namespace and namespacePath must each name an actor: one
+            # above that level would search every actor's records, a use case's
+            # included. If either key matches by prefix, an actor stub of "u" or
+            # "uc" would still cover the use cases' "uc-" actors, so both are
+            # refused as well.
+            iam.PolicyStatement(
+                sid="AgentCoreMemoryRecords",
+                actions=["bedrock-agentcore:RetrieveMemoryRecords"],
+                # This deployment's Memory (MemoryStack names it <prefix>memory).
+                resources=[arn(f"memory/{runtime_prefix}memory-*")],
+                conditions={
+                    "StringLikeIfExists": dict.fromkeys(
+                        NAMESPACE_KEYS, f"/strategies/*/actors/{memory_actor_prefix}*"
+                    )
+                }
+                if memory_actor_prefix
+                else {
+                    "StringNotLike": {
+                        key: list(_USE_CASE_ACTOR_STUBS) for key in NAMESPACE_KEYS
+                    },
+                    "StringLikeIfExists": dict.fromkeys(
+                        NAMESPACE_KEYS, "/strategies/*/actors/?*"
+                    ),
+                },
+            ),
+            # The built-in Code Interpreter is session based: the agent must
+            # start a session before InvokeCodeInterpreter and may stop it
+            # during cleanup. Keep these permissions off the broad AgentCore
+            # statement and scope them to the one AWS-managed interpreter the
+            # shipped agent patterns use.
+            iam.PolicyStatement(
+                sid="AgentCoreCodeInterpreter",
+                actions=[
+                    "bedrock-agentcore:StartCodeInterpreterSession",
+                    "bedrock-agentcore:InvokeCodeInterpreter",
+                    "bedrock-agentcore:StopCodeInterpreterSession",
+                ],
+                resources=[
+                    cdk.Stack.of(role).format_arn(
+                        service="bedrock-agentcore",
+                        account="aws",
+                        resource="code-interpreter",
+                        resource_name="aws.codeinterpreter.v1",
+                        arn_format=cdk.ArnFormat.SLASH_RESOURCE_NAME,
+                    )
+                ],
+            ),
+            # AgentCore Identity: this runtime's own workload identity only. The
+            # Runtime names it after the runtime (<name>-<suffix>), so another
+            # runtime's role cannot mint a workload token for this one.
+            iam.PolicyStatement(
+                sid="AgentCoreOwnWorkloadIdentity",
+                actions=[
+                    "bedrock-agentcore:CreateWorkloadIdentity",
+                    "bedrock-agentcore:GetWorkloadAccessToken",
+                    "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+                    "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                ],
+                resources=workload_identity,
+            ),
+        ]
+        if credential_provider_names:
+            # The token vault is shared by every runtime in the account, and a
+            # provider holds its own exchange config, so a role with
+            # GetResourceOauth2Token on "*" could mint any provider's token.
+            # Name the providers this runtime declares, and only their secrets:
+            # GetResourceOauth2Token reads the provider's client secret from a
+            # secret AgentCore Identity owns, using the CALLER's identity.
+            statements += [
+                iam.PolicyStatement(
+                    sid="AgentCoreTokenVaultOwnProviders",
+                    actions=["bedrock-agentcore:GetResourceOauth2Token"],
+                    resources=[
+                        arn("token-vault/default"),
+                        *workload_identity,
+                        *(
+                            arn(f"token-vault/default/oauth2credentialprovider/{name}")
+                            for name in credential_provider_names
+                        ),
+                    ],
+                ),
+                iam.PolicyStatement(
+                    sid="AgentCoreIdentityTokenVaultSecrets",
+                    actions=["secretsmanager:GetSecretValue"],
+                    resources=[
+                        stack.format_arn(
+                            service="secretsmanager",
+                            resource="secret",
+                            resource_name=f"bedrock-agentcore-identity!default/oauth2/{name}-*",
+                            arn_format=cdk.ArnFormat.COLON_RESOURCE_NAME,
+                        )
+                        for name in credential_provider_names
+                    ],
+                ),
+            ]
+        if guardrail is not None:
+            statements += [
+                # Using a guardrail during inference requires ApplyGuardrail on
+                # it — scoped to this stack's own baseline guardrail, nothing else.
+                iam.PolicyStatement(
+                    sid="ApplyBaselineGuardrail",
+                    actions=["bedrock:ApplyGuardrail"],
+                    resources=[guardrail.attr_guardrail_arn],
+                ),
+                # The enforcement point: deny any inference call that does not
+                # carry a guardrail. Null:true matches only when the key is
+                # ABSENT, so this is self-consistent without the negated-operator
+                # guard the SCPs need (control-library/scp/memory/enforce-cmk.json
+                # documents that pattern).
+                iam.PolicyStatement(
+                    sid="DenyUngovernedInference",
+                    effect=iam.Effect.DENY,
+                    actions=[
+                        "bedrock:InvokeModel",
+                        "bedrock:InvokeModelWithResponseStream",
+                        "bedrock:Converse",
+                        "bedrock:ConverseStream",
+                    ],
+                    resources=["*"],
+                    conditions={"Null": {"bedrock:GuardrailIdentifier": "true"}},
+                ),
+            ]
+        for stmt in statements:
+            role.add_to_policy(stmt)

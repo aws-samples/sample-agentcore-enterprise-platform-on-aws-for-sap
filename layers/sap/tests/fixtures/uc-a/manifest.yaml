@@ -1,0 +1,6 @@
+# An installed use case for the access rows of test_sap_layer.py; never enabled.
+name: uc-a
+owner: tests
+summary: Test use case named in layers.sap.access.
+platform_interface: 3
+stacks: [uc-uc-a]

@@ -1,0 +1,90 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Run grant lifecycle</title>
+<link rel="stylesheet" href="diagram.css">
+<style>body { --w: 1480px; } .hops { --cols: 4; --gap: 150px; }</style>
+
+<p class="kicker">SAP exception handling</p>
+<h1>Run grant lifecycle</h1>
+
+<div id="canvas">
+  <svg id="wires"></svg>
+
+  <div class="phases hops">
+    <div class="phase">Run starter</div>
+    <div class="phase core">Agent</div>
+    <div class="phase emph">Gateway interceptor</div>
+    <div class="phase">Tool</div>
+  </div>
+
+  <div class="hops">
+    <div class="tile" id="invoker">
+      <img src="icons/lambda.svg" alt="">
+      <div class="lab">Agent invoker</div><div class="sub">the only writer of run grants</div>
+    </div>
+    <div class="tile core" id="agent">
+      <img src="icons/agentcore.svg" alt="">
+      <div class="lab">Agent run</div><div class="sub">holds the run id and the grant secret</div>
+    </div>
+    <div class="tile gate" id="checks">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <path d="M12 2.6l7.6 3v6.1c0 4.6-3.2 8.2-7.6 9.7-4.4-1.5-7.6-5.1-7.6-9.7V5.6z"/>
+        <path d="M8.6 12.2l2.4 2.4 4.4-4.8"/></svg>
+      <div class="lab">Run checks</div><div class="sub">on case tools, SAP writes, and the agent's SAP reads</div>
+    </div>
+    <div class="tile" id="tool">
+      <img src="icons/lambda.svg" alt="">
+      <div class="lab">Case tool or SAP</div><div class="sub">called only when the checks allow it</div>
+    </div>
+  </div>
+
+  <div class="hops band">
+    <div class="tile" id="grants" style="grid-column: 1">
+      <img src="icons/dynamodb.svg" alt="">
+      <div class="lab">Run grants table</div><div class="sub">one row per run; expires 20 minutes after it is written</div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="card">
+    <div class="lab">What a run grant holds</div>
+    <ul>
+      <li>The run id and the app client that may use it.</li>
+      <li>A hash of the grant secret. Only the invoker and the agent hold the secret.</li>
+      <li>The case, and the packs the run may touch.</li>
+      <li>The one write a person approved, if there is one, and who approved it.</li>
+      <li>Whether the run is a rehearsal or a question, which may not change data.</li>
+    </ul>
+  </div>
+  <div class="card gate">
+    <div class="lab">When the run checks refuse a call</div>
+    <ul>
+      <li>No grant for the run id, a different app client, a wrong secret, or an expired grant.</li>
+      <li>A rehearsal or a question that tries to change data.</li>
+      <li>A SAP write to a document that is not the case's own (the case document check).</li>
+      <li>A SAP write over the pack's limit that is not the write a person approved.</li>
+      <li>After the run ends: the invoker has deleted the grant, so its secret cannot be used again.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="legend">
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 10% 55%)" stroke-width="1.5"/></svg><b>During the run</b></span>
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 12% 72%)" stroke-width="1.5" stroke-dasharray="6 5"/></svg>When the run ends</span>
+  <span>Amber = can refuse the call</span>
+</div>
+
+<script>
+const EDGES = [
+  ["invoker", "grants",  "v",  -40, "1. writes the grant",         "",     1],
+  ["invoker", "agent",   "h",    0, "2. starts the run",           "",     2],
+  ["agent",   "checks",  "h",    0, "3. tool call, run id, secret", "",    3],
+  ["checks",  "grants",  "vl",   0, "4. reads the grant",          "",     4],
+  ["checks",  "tool",    "h",    0, "5. allowed",                  "",     5],
+  ["invoker", "grants",  "v",   40, "6. deletes the grant",        "dash", 6],
+];
+</script>
+<script src="diagram.js"></script>

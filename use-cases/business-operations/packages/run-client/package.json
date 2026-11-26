@@ -1,0 +1,18 @@
+{
+  "name": "@business-operations/run-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Framework-free client for the ERP agent's run protocol: events channel, ordering, and AG-UI reduction.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "example": "node examples/follow-run.ts"
+  },
+  "//deps": "Deliberately none, dev or otherwise. The frontend consumes this through a path alias, its vitest runs these tests, and Node 22 runs the TypeScript directly — so a build step, a bundler and a second test runner all stay unnecessary. Adding a dependency here means auditing it for the browser bundle too.",
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

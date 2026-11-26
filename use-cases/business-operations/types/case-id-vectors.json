@@ -1,0 +1,67 @@
+{
+  "$comment": "Case-id vectors both codecs are tested against: agent/utils/case_key.py mints and reads each `derived` row, frontend/src/lib/caseKey.ts reads it, and both refuse every `invalid` id. Regenerate a row with case_key.derive_case_id, never by hand.",
+  "derived": [
+    {
+      "pack_id": "finance_ops",
+      "short_id": "ap",
+      "key": {
+        "SupplierInvoice": "5100001976",
+        "FiscalYear": "2026"
+      },
+      "case_id": "ap-6a5da47jnjsz3ihuo7hqvgomfd",
+      "session_id": "erp-case-ap-6a5da47jnjsz3ihuo7hqvgomfd"
+    },
+    {
+      "pack_id": "finance_ops",
+      "short_id": "ap",
+      "key": {
+        "FiscalYear": "2026",
+        "SupplierInvoice": "5100001976"
+      },
+      "case_id": "ap-6a5da47jnjsz3ihuo7hqvgomfd",
+      "session_id": "erp-case-ap-6a5da47jnjsz3ihuo7hqvgomfd"
+    },
+    {
+      "pack_id": "procurement",
+      "short_id": "po",
+      "key": {
+        "PurchaseOrder": "4500001234",
+        "Item": "00010"
+      },
+      "case_id": "po-2pzhrjmd2h5oosk6miij7gw6ni",
+      "session_id": "erp-case-po-2pzhrjmd2h5oosk6miij7gw6ni"
+    },
+    {
+      "pack_id": "inventory_x",
+      "short_id": "invtry12",
+      "key": {
+        "Material": "MAT-01/A b",
+        "Plant": "1010"
+      },
+      "case_id": "invtry12-jrnd5ixtgqnqmw4mninbrguphi",
+      "session_id": "erp-case-invtry12-jrnd5ixtgqnqmw4mninbrguphi"
+    }
+  ],
+  "invalid": [
+    "",
+    "5100001922-2026",
+    "ap#5100001922",
+    "ap/5100001922",
+    "AP-6A5DA47JNJSZ3IHUO7HQVGOMFD",
+    "a-6a5da47jnjsz3ihuo7hqvgomfd",
+    "ap-6a5da47jnjsz3ihuo7hqvgomf",
+    "ap-6a5da47jnjsz3ihuo7hqvgomfda",
+    "ap-6a5da47jnjsz3ihuo7hqvgomf1",
+    "ap-6a5da47jnjsz3ihuo7hqvgomf8",
+    "abcdefghi-6a5da47jnjsz3ihuo7hqvgomfd",
+    "ap_6a5da47jnjsz3ihuo7hqvgomfd",
+    "1p-6a5da47jnjsz3ihuo7hqvgomfd",
+    "ap--6a5da47jnjsz3ihuo7hqvgomfd"
+  ],
+  "trimmed": [
+    {
+      "raw": "  ap-6a5da47jnjsz3ihuo7hqvgomfd\n",
+      "case_id": "ap-6a5da47jnjsz3ihuo7hqvgomfd"
+    }
+  ]
+}

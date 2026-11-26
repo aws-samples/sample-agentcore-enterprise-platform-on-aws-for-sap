@@ -1,0 +1,388 @@
+/* Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * The console's tokens: the only file that decides a value. Components in
+ * components/ui are stock shadcn (Base UI) and read the shadcn token names below;
+ * pages compose them and set no colour, size or radius of their own (REFERENCE.md,
+ * and the lint rules in eslint/console-rules.mjs).
+ *
+ * Palette: ink on off-white, Radix gray, a flat shell (console refresh plan, decision 7).
+ * Colour is kept for state, and each tone means one thing: violet the agent is working,
+ * amber a person is needed, jade done in SAP, red failed or refused.
+ */
+
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: var(--font-sans-face);
+  --font-mono: var(--font-mono-face);
+  --font-heading: var(--font-sans-face);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-selected: var(--selected);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-link: var(--link);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Status tones (lib/statusTone.ts maps a status to one). `-dot` is the mark, `-wash`
+     a badge's ground, `-ink` the text on that wash. */
+  --color-progress: var(--tone-progress);
+  --color-progress-wash: var(--tone-progress-wash);
+  --color-progress-ink: var(--tone-progress-ink);
+  --color-attention: var(--tone-attention);
+  --color-attention-wash: var(--tone-attention-wash);
+  --color-attention-ink: var(--tone-attention-ink);
+  --color-success: var(--tone-success);
+  --color-success-wash: var(--tone-success-wash);
+  --color-success-ink: var(--tone-success-ink);
+  --color-danger: var(--tone-danger);
+  --color-danger-wash: var(--tone-danger-wash);
+  --color-danger-ink: var(--tone-danger-ink);
+  --color-neutral: var(--tone-neutral);
+  --color-neutral-wash: var(--tone-neutral-wash);
+  /* The tone as text or an icon with no wash under it: 4.5:1 on the page. */
+  --color-success-text: var(--tone-success-text);
+  --color-danger-text: var(--tone-danger-text);
+
+  /* A third ink step, 3:1: for icons and rules only, never for text. */
+  --color-subtle-foreground: var(--subtle-foreground);
+
+  /* One knob, 8 px; steps at 4, 6, 8 and 12 px. */
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* Tailwind's own type scale, 12 px (`text-xs`) the floor. */
+@theme {
+  --default-transition-timing-function: var(--ease-standard);
+  --default-transition-duration: var(--duration-fast);
+  /* The reading measure for SOP prose and long descriptions: `max-w-measure`. */
+  --container-measure: 72ch;
+}
+
+:root {
+  --radius: 0.5rem;
+
+  /* Radix gray, light. */
+  --background: #fcfcfc;
+  --foreground: #202020;
+  --card: #ffffff;
+  --card-foreground: #202020;
+  --popover: #ffffff;
+  --popover-foreground: #202020;
+  --primary: #202020;
+  --primary-foreground: #ffffff;
+  --secondary: #f0f0f0;
+  --secondary-foreground: #202020;
+  --muted: #f0f0f0;
+  --muted-foreground: #646464;
+  --subtle-foreground: #838383;
+  --accent: #e8e8e8;
+  --accent-foreground: #202020;
+  --selected: #e8e8e8;
+  /* Darker than Radix red 11 so it clears 4.5:1 as text on its own 10 % wash, which is
+     how the stock destructive button draws it. */
+  --destructive: #c4282d;
+  --border: #d9d9d9;
+  --input: #cecece;
+  --ring: #202020;
+  --link: #202020;
+  --chart-1: #202020;
+  --chart-2: #646464;
+  --chart-3: #8d8d8d;
+  --chart-4: #bbbbbb;
+  --chart-5: #d9d9d9;
+  --sidebar: #f9f9f9;
+  --sidebar-foreground: #202020;
+  --sidebar-primary: #202020;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e8e8e8;
+  --sidebar-accent-foreground: #202020;
+  --sidebar-border: #d9d9d9;
+  --sidebar-ring: #202020;
+
+  /* Radix violet, amber, jade, red; `-text` is the step that reads as text on the page. */
+  --tone-progress: #6e56cf;
+  --tone-progress-wash: #f4f0fe;
+  --tone-progress-ink: #1f1044;
+  --tone-progress-text: #6550b9;
+  --tone-attention: #ab6400;
+  --tone-attention-wash: #ffee9c;
+  --tone-attention-ink: #4f3422;
+  --tone-success: #208368;
+  --tone-success-wash: #e6f7ed;
+  --tone-success-ink: #1d3b31;
+  --tone-success-text: #208368;
+  --tone-danger: #e5484d;
+  --tone-danger-wash: #feebec;
+  --tone-danger-ink: #641723;
+  --tone-danger-text: #ce2c31;
+  --tone-neutral: #8d8d8d;
+  --tone-neutral-wash: #f0f0f0;
+
+  /* Chrome sizes (plan, Tokens). */
+  --header-height: 3rem;
+  --toolbar-height: 2.75rem;
+  --assistant-width: 22.5rem;
+  --gutter: 1.5rem;
+  /* The floating ask bar, and what every page column keeps clear for it at the bottom. */
+  --ask-bar-height: 3rem;
+  --ask-bar-offset: 1rem;
+
+  /* The highlight under a verified SOP quote (`bg-marker`). */
+  --marker: var(--tone-attention-wash);
+
+  /* Motion: one curve, three durations; nothing animates longer than slow. */
+  --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 250ms;
+
+  /* Geist for text, Geist Mono for what is compared against SAP character by character
+     (decision 13). Both ship `tnum`. */
+  --font-sans-face:
+    "Geist Variable", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono-face: "Geist Mono Variable", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (min-width: 1920px) {
+  :root {
+    --assistant-width: 25rem;
+  }
+}
+
+@media (max-width: 1279px) {
+  :root {
+    --gutter: 1rem;
+  }
+}
+
+.dark {
+  /* Radix gray, dark. */
+  --background: #191919;
+  --foreground: #eeeeee;
+  --card: #191919;
+  --card-foreground: #eeeeee;
+  --popover: #191919;
+  --popover-foreground: #eeeeee;
+  --primary: #eeeeee;
+  --primary-foreground: #111111;
+  --secondary: #222222;
+  --secondary-foreground: #eeeeee;
+  --muted: #222222;
+  --muted-foreground: #b4b4b4;
+  --subtle-foreground: #7b7b7b;
+  --accent: #2a2a2a;
+  --accent-foreground: #eeeeee;
+  --selected: #313131;
+  --destructive: #ff9592;
+  --border: #3a3a3a;
+  --input: #484848;
+  --ring: #eeeeee;
+  --link: #eeeeee;
+  --chart-1: #eeeeee;
+  --chart-2: #b4b4b4;
+  --chart-3: #6e6e6e;
+  --chart-4: #484848;
+  --chart-5: #3a3a3a;
+  --sidebar: #111111;
+  --sidebar-foreground: #eeeeee;
+  --sidebar-primary: #eeeeee;
+  --sidebar-primary-foreground: #111111;
+  --sidebar-accent: #313131;
+  --sidebar-accent-foreground: #eeeeee;
+  --sidebar-border: #3a3a3a;
+  --sidebar-ring: #eeeeee;
+
+  --tone-progress: #6e56cf;
+  --tone-progress-wash: #291f43;
+  --tone-progress-ink: #e2ddfe;
+  --tone-progress-text: #baa7ff;
+  --tone-attention: #ffc53d;
+  --tone-attention-wash: #3f2700;
+  --tone-attention-ink: #ffe7b3;
+  --tone-success: #29a383;
+  --tone-success-wash: #0f2e22;
+  --tone-success-ink: #c1f5e5;
+  --tone-success-text: #1fd8a4;
+  --tone-danger: #e5484d;
+  --tone-danger-wash: #3b1219;
+  --tone-danger-ink: #ffd1d9;
+  --tone-danger-text: #ff9592;
+  --tone-neutral: #6e6e6e;
+  --tone-neutral-wash: #222222;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-sm text-foreground antialiased;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+/* Entrances the pages built before the refresh use. Each is an entrance only, and each
+   has a reduced-motion fallback below. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-rise-in {
+  opacity: 0;
+  animation: rise-in var(--duration-base) var(--ease-standard) forwards;
+}
+
+@keyframes tick-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-tick-in {
+  opacity: 0;
+  animation: tick-in var(--duration-fast) var(--ease-standard) forwards;
+  animation-delay: calc(var(--tick-i, 0) * 60ms);
+}
+
+@keyframes card-settle {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-card-settle {
+  opacity: 0;
+  animation: card-settle var(--duration-base) var(--ease-standard) forwards;
+}
+
+/* Another case opened on the case page: its number and stepper position flash once, so the
+   change cannot be mistaken for a refresh of the same case. */
+@keyframes case-change {
+  from {
+    background-color: var(--color-attention-wash);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.animate-case-change {
+  animation: case-change 1200ms var(--ease-standard);
+}
+
+/* A verified quote is marked with a wipe, like a highlighter; the element declares its
+   gradient and `no-repeat` (components/chat/Citation). */
+@keyframes marker-wipe {
+  from {
+    background-size: 0% 100%;
+  }
+  to {
+    background-size: 100% 100%;
+  }
+}
+
+.animate-marker-wipe {
+  background-size: 0% 100%;
+  animation: marker-wipe 180ms var(--ease-standard) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise-in,
+  .animate-tick-in,
+  .animate-card-settle {
+    animation: none;
+    opacity: 1;
+  }
+  .animate-marker-wipe {
+    animation: none;
+    background-size: 100% 100%;
+  }
+}
+
+/* Diagonal stripes in the theme's own surfaces: the sandbox band (decision 22, preview 1.11),
+   which says "not production" across the window. Tokens only, so both themes follow. */
+@utility bg-hatch {
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--muted) 0 6px,
+    var(--background) 6px 12px
+  );
+}
+
+/* The bottom of a page column: the ask bar's height, its offset below and above it, and a
+   gutter, so the last line of a long page scrolls clear of the bar. */
+@utility pb-ask {
+  padding-bottom: calc(var(--ask-bar-height) + 2 * var(--ask-bar-offset) + var(--gutter));
+}
+
+/* The highlighter mark under a verified SOP quote: one band of --marker that the wipe
+   animation sizes (see the marker note above). */
+@utility bg-marker {
+  background-image: linear-gradient(var(--marker), var(--marker));
+}
+
+/* The skip link: off screen until focused, then above the sidebar at the top left. Its own
+   layer, set here because only components in ui/ set z-index classes. */
+@utility skip-link {
+  @apply sr-only rounded-md bg-card px-3 py-2 text-sm;
+  &:focus {
+    @apply not-sr-only absolute top-2 left-2;
+    z-index: 60;
+  }
+}

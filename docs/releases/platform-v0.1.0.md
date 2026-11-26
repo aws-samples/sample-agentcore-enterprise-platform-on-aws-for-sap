@@ -1,0 +1,83 @@
+# Enterprise Agentic AI Platform Accelerator v0.1.0 release notes
+
+The release notes of the Agentic Business Platform Accelerator for SAP on AWS are in
+[CHANGELOG.md](../../CHANGELOG.md) and on its GitHub release. This page is the release notes
+of the upstream platform it is built on, the Enterprise Agentic AI Platform Accelerator.
+Its installation steps check out the upstream platform's `v0.1.0` tag, which is in the
+[upstream repository](https://github.com/aws-samples/sample-agentcore-enterprise-platform).
+In this repository, `v0.1.0` is the Accelerator's own release.
+
+Release date: 2026-09-21
+
+v0.1.0 is the first reviewable, numbered accelerator baseline. It packages the
+Design → Build → Verify workflow, customer preflight, documented live evidence,
+and the supported AgentCore migration slice. It does **not** declare a
+customer deployment ready for production use.
+
+## Highlights
+
+- One declarative `platform.yaml` drives stack planning, deployment,
+  verification, dashboard status, and cleanup.
+- Centralized and federated paths have live evidence; distributed topology has
+  automated contract evidence.
+- Seven agent framework patterns, enterprise identity options, Gateway,
+  Memory, observability, and opt-in security controls are included.
+- Compatible arm64 source/images can run on AgentCore Runtime through the
+  supplied migration adapter.
+- `./scripts/deploy.sh doctor` checks local tools, AWS account/Region, required
+  secrets, model metadata, and migration image inputs without changing AWS.
+
+Read the exact [support matrix](../SUPPORT_MATRIX.md) and
+[known limitations](../KNOWN_LIMITATIONS.md) before customer use. The complete
+change list is in the platform's
+[changelog](https://github.com/aws-samples/sample-agentcore-enterprise-platform/blob/v0.1.0/CHANGELOG.md).
+
+## Installation
+
+```bash
+git fetch --tags
+git checkout v0.1.0
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Complete the design, then preflight it:
+
+```bash
+./scripts/deploy.sh design --profile greenfield
+# Replace customer-specific values in platform.yaml.
+./scripts/deploy.sh design
+./scripts/deploy.sh doctor
+```
+
+## Upgrade an existing checkout
+
+1. Commit or preserve local manifest/use-case changes.
+2. Compare the existing design with v0.1.0 and retain the intended
+   `platform.yaml`.
+3. Run `design`, `doctor`, and `diff`.
+4. Deploy through `./scripts/deploy.sh build`; do not bypass its account,
+   secret, or identity-rotation checks with a direct production `cdk deploy`.
+5. Run `./scripts/deploy.sh verify` and retain sanitized evidence.
+
+This is the first numbered release, so there is no earlier versioned schema
+migration. Existing untagged deployments should be treated as upgrades and
+reviewed with `diff`.
+
+## Rollback
+
+- A failed CloudFormation update normally rolls back in place. Correct the
+  cause and rerun the same scoped build.
+- To roll back accelerator code, check out the last reviewed tag/commit, run
+  `design` and `diff`, and review replacement or deletion actions before
+  deploying.
+- Do not use `destroy` as an application rollback. Production mode retains
+  stateful resources, and their disposition follows the customer's approved
+  retention plan.
+- For migration traffic, keep the source running. Customer-owned routing
+  returns traffic to that source using the approved rollback procedure; the
+  accelerator does not operate the router.
+
+The [migration runbook](../MIGRATION_RUNBOOK.md) contains the full evidence and
+rollback checklist.

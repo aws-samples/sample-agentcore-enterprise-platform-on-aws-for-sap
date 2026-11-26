@@ -1,0 +1,23 @@
+# Parity fixture: the SAP layer enabled with one system and no use case requiring it,
+# so check-contract.sh proves its stack lands between the core stacks and the use cases.
+project: agentcore-workshop
+environment: dev
+
+gateway:
+  interceptor_extensions:
+    - path: layers/sap/sap_check
+      target_prefixes: [sap-]
+      request_headers: true
+
+security:
+  cedar:
+    enabled: true
+
+layers:
+  sap:
+    systems:
+      s4:
+        system_role: sandbox
+        base_url: https://sap.example.com/sap/opu/odata/sap/
+        client: "100"
+        secret_name: sap/s4

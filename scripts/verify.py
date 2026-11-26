@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""verify — one configuration-aware health check for the whole deployment.
+
+Replaces scripts/test.py, which could not fail: it swallowed invoke
+exceptions as "expected", hardcoded the default project name, and had no
+non-zero exit path — a broken deployment ended with "Done." and exit 0.
+
+This command asks the deployment contract (expected_stacks) what THIS
+configuration promises, runs the matching existing tools, and exits non-zero
+if any claim fails:
+
+    stack in footprint          check
+    ----------------------      ------------------------------------------
+    gateway                     test_gateway.py       (MCP tools/list + call)
+    memory                      test_memory.py        (event write/read)
+    observability               check_observability.py
+    networking                  check_network.py      (runtimes really in VPC)
+    (require_guardrails flag)   check_guardrail_enforcement.py (IAM simulation)
+    (observability.alarms flag) check_alarms.py       (alarms exist, none firing)
+    runtime-orchestrator        invoke.py             (live invoke; migration
+                                                       uses a basic contract
+                                                       check, normal agents use
+                                                       pattern-specific checks)
+    runtime-code-agent          invoke.py --a2a code-agent
+    runtime-research-agent      invoke.py --a2a research-agent
+    layer-<name> (enabled layer) layers/<name>/verify.py, after the core checks
+    uc-<name> (enabled use case) use-cases/<name>/verify.py, run LAST so a
+                                broken platform fails on the platform check
+
+Configuration comes from platform.yaml when present (env vars win, same
+precedence as everywhere else). Run it directly or via `deploy.sh verify`.
+"""
+
+import os
+import subprocess  # nosec B404 — composing our own scripts, no shell
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from infra_utils.platform_config import (
+    PlatformConfig,
+    discover_layers,
+    discover_use_cases,
+    load_platform_config,
+    resolve_region,
+    to_env,
+)
+
+# A production guardrail's PROMPT_ATTACK filter (HIGH) blocked "Health check: reply with
+# one word.", so every verify raised the guardrail alarm; this phrasing passes it.
+HEALTH_PROMPT = "Reply with one word: are you up?"
+CODE_INTERPRETER_MARKER = "CODE_INTERPRETER_OK"
+CODE_INTERPRETER_PROMPT = (
+    "Use execute_python_securely to run print('CODE_INTERPRETER_OK'). "
+    "After the tool succeeds, reply with one word."
+)
+
+
+def load_config() -> PlatformConfig:
+    """platform.yaml when present, schema defaults otherwise; either way the
+    child tools see the same values through the environment (env wins)."""
+    path = Path(os.environ.get("PLATFORM_CONFIG", REPO / "platform.yaml"))
+    config = load_platform_config(path) if path.exists() else PlatformConfig()
+    # Without a manifest, to_env() would pin the schema default (us-east-1)
+    # into the child tools' environment even when workshop.env or the AWS
+    # profile says otherwise — resolve the region for real first.
+    os.environ.setdefault("AWS_REGION", resolve_region())
+    for key, value in to_env(config).items():
+        os.environ.setdefault(key, value)
+    return config
+
+
+def checks_for(
+    suffixes: set[str],
+    agent_pattern: str,
+    require_guardrails: bool = False,
+    alarms: bool = False,
+    use_cases: Sequence[str] = (),
+    migration: bool = False,
+    layers: Sequence[str] = (),
+) -> list[tuple[str, list[str]]]:
+    """Map a footprint onto the tools that verify it. Pure — unit-tested.
+
+    `use_cases` are the names of enabled use cases; each contributes its own
+    verify.py (CONTRIBUTING_USE_CASES.md), appended after the core checks.
+    Paths are relative to scripts/, which is where main() runs every tool."""
+    checks: list[tuple[str, list[str]]] = []
+    if "auth" in suffixes:
+        # First, deliberately: every later check mints a token through the same
+        # issuer, and this one turns an opaque 401 into the IdP-side fix.
+        checks.append(("identity", ["check_identity.py"]))
+    if "gateway" in suffixes:
+        checks.append(("gateway", ["test_gateway.py"]))
+    if "memory" in suffixes:
+        checks.append(("memory", ["test_memory.py"]))
+    if "observability" in suffixes:
+        checks.append(("observability", ["check_observability.py"]))
+    if "networking" in suffixes:
+        checks.append(("networking", ["check_network.py"]))
+    if require_guardrails and any(
+        s.startswith("runtime-") or s.endswith("-runtime") for s in suffixes
+    ):
+        # It simulates every runtime role: the platform's and each use case's.
+        checks.append(("guardrail enforcement", ["check_guardrail_enforcement.py"]))
+    if alarms:
+        checks.append(("alarms", ["check_alarms.py"]))
+    if "runtime-orchestrator" in suffixes:
+        if migration:
+            # A migrated image comes from migration.source, not agents.pattern.
+            # Prove its AgentCore HTTP contract with a real invoke, without
+            # assuming that the customer image exposes our Code Interpreter
+            # tool or speaks AG-UI.
+            invoke_args = ["invoke.py", "--require-success", HEALTH_PROMPT]
+        else:
+            agui = ["--agui"] if agent_pattern.startswith("agui-") else []
+            if agent_pattern == "orchestrator":
+                invoke_args = ["invoke.py", *agui, HEALTH_PROMPT]
+            else:
+                invoke_args = [
+                    "invoke.py",
+                    *agui,
+                    "--require-tool",
+                    "execute_python_securely",
+                    "--require-tool-result",
+                    CODE_INTERPRETER_MARKER,
+                    CODE_INTERPRETER_PROMPT,
+                ]
+        checks.append(("orchestrator invoke", invoke_args))
+    if "runtime-code-agent" in suffixes:
+        checks.append(
+            ("a2a code-agent", ["invoke.py", "--a2a", "code-agent", HEALTH_PROMPT])
+        )
+    if "runtime-research-agent" in suffixes:
+        checks.append(
+            (
+                "a2a research-agent",
+                ["invoke.py", "--a2a", "research-agent", HEALTH_PROMPT],
+            )
+        )
+    for name in layers:
+        checks.append((f"layer {name}", [f"../layers/{name}/verify.py"]))
+    for name in use_cases:
+        checks.append((f"use case {name}", [f"../use-cases/{name}/verify.py"]))
+    return checks
+
+
+def main() -> int:
+    config = load_config()
+
+    # The footprint is role-dependent in a federation; the account decides.
+    import boto3
+
+    account = boto3.client("sts").get_caller_identity()["Account"]
+    prefix = f"{config.project}-{config.environment}-"
+    suffixes = {s.removeprefix(prefix) for s in config.expected_stacks(account)}
+    pattern = os.environ.get("AGENT_PATTERN", config.agents.pattern)
+    require_guardrails = (
+        os.environ.get(
+            "REQUIRE_GUARDRAILS", str(config.security.require_guardrails).lower()
+        )
+        == "true"
+    )
+    alarms = (
+        os.environ.get("ENABLE_ALARMS", str(config.observability.alarms).lower())
+        == "true"
+    )
+
+    # check_identity.py compares the deployed issuer mode against the design.
+    os.environ.setdefault("IDP_MODE", config.identity.mode)
+    # Enabled use cases whose stacks are actually in this footprint (in a
+    # federation, expected_stacks already placed them on the right side).
+    manifests = discover_use_cases() if config.use_cases else {}
+    use_cases = [
+        name
+        for name in sorted(config.use_cases)
+        if any(s in suffixes for s in manifests[name].stacks)
+    ]
+    layer_manifests = discover_layers() if config.layers else {}
+    layers = [
+        name
+        for name in sorted(config.layers)
+        if any(s in suffixes for s in layer_manifests[name].stacks)
+    ]
+    checks = checks_for(
+        suffixes,
+        pattern,
+        require_guardrails,
+        alarms,
+        use_cases,
+        migration=config.migration is not None,
+        layers=layers,
+    )
+    print(f"Verifying {config.project}/{config.environment} in account {account}")
+    print(f"Footprint: {' '.join(sorted(suffixes))}\n")
+
+    failed: list[str] = []
+    for name, argv in checks:
+        # flush: the check runs as a child that writes straight to the same stream, so a
+        # buffered header would land after its output in a log or CI job.
+        print(f"── {name} " + "─" * max(1, 58 - len(name)), flush=True)
+        cmd = [sys.executable, str(REPO / "scripts" / argv[0]), *argv[1:]]
+        result = subprocess.run(cmd, cwd=REPO / "scripts", check=False)  # nosec B603
+        if result.returncode != 0:
+            failed.append(name)
+        print()
+
+    print("═" * 60)
+    if failed:
+        print(f"FAILED ({len(failed)}/{len(checks)}): {', '.join(failed)}")
+        return 1
+    print(f"OK: all {len(checks)} checks passed for this footprint")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

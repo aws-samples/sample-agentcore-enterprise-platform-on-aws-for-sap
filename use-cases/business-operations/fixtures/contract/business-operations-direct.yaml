@@ -1,0 +1,67 @@
+# Parity fixture: business-operations under identity.mode direct (Entra issues every
+# token, no user pool), with an obo SAP system so the person-token path is built too.
+# check-contract.sh proves it synthesizes; the app ids are placeholders.
+project: agentcore-workshop
+environment: dev
+region: us-east-1
+
+deployment:
+  platform_account: "111111111111"
+
+identity:
+  idp: entra_id
+  mode: direct
+  tenant_id: "00000000-0000-0000-0000-000000000000"
+  client_id: "REPLACE_WITH_ENTRA_APP_CLIENT_ID"
+  client_secret_name: "agentcore/idp-client-secret"
+  use_case_clients:
+    business-operations:
+      reader:
+        client_id: "REPLACE_WITH_READER_APP_ID"
+        client_secret_name: "business-operations/entra/reader"
+      writer:
+        client_id: "REPLACE_WITH_WRITER_APP_ID"
+        client_secret_name: "business-operations/entra/writer"
+
+agents:
+  pattern: strands-agent
+
+gateway:
+  interceptor_extensions:
+    - path: layers/sap/sap_check
+      target_prefixes: [sap-]
+      request_headers: true
+    - path: use-cases/business-operations/business_operations_check
+      target_prefixes: [business-operations-, sap-]
+      request_headers: true
+
+security:
+  cedar:
+    enabled: true
+
+use_cases:
+  business-operations:
+    entra:
+      console_client_id: "REPLACE_WITH_CONSOLE_APP_ID"
+      api_scope: "api://REPLACE_WITH_ENTRA_APP_CLIENT_ID/business-operations"
+      delegating_client_id: "REPLACE_WITH_DELEGATING_APP_ID"
+      delegating_secret_name: "business-operations/entra/delegating"
+
+layers:
+  sap:
+    systems:
+      s4:
+        system_role: development
+        base_url: https://sap.example.com/sap/opu/odata/sap/
+        client: "100"
+        secret_name: business-operations/sap/s4
+      s4-person:
+        system_role: development
+        flow: obo
+        base_url: https://sap.example.com/sap/opu/odata/sap/
+        client: "100"
+        secret_name: business-operations/sap/s4-obo
+        scopes: ["api://REPLACE_WITH_SAP_APP_ID/.default"]
+        gateway_scopes: ["api://REPLACE_WITH_MCP_APP_ID/.default"]
+    access:
+      business-operations: {read: "*", write: {s4: [function_import]}, bypass_gateway: [s4]}

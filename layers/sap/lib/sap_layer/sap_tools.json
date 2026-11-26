@@ -1,0 +1,1117 @@
+[
+ {
+  "annotations": {
+   "readOnlyHint": true
+  },
+  "description": "DESCRIPTION: Find all services available in the SAP system by querying the service catalog.\nThis tool searches the IWFND/CATALOGSERVICE to discover available services. Services can be queried based on one of the Service Types : WEB_API, UI.\n\nRETURNS: A structured list of catalog services will be returned.\nThe output is an array of service objects, Each item may include the following fields:\n1. id \u2014 Unique identifier of the service\n2. title \u2014 Human-readable name of the service\n3. description \u2014 Short summary of the service\u2019s purpose\n4. serviceUrl \u2014 URL endpoint for accessing the service\n5. metadataUrl \u2014 URL pointing to related metadata or documentation\nThe data field of the response may be empty if no services are found or if an error occurs.",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "service_type": {
+     "default": "WEB_API",
+     "description": "The type of SAP service to search for",
+     "enum": [
+      "WEB_API",
+      "UI"
+     ],
+     "type": "string"
+    },
+    "skip": {
+     "default": 0,
+     "description": "Number of services to skip from the response.",
+     "maximum": 10000,
+     "minimum": 0,
+     "type": "integer"
+    },
+    "top": {
+     "default": 0,
+     "description": "Number of services to return (0 = all services).",
+     "maximum": 1000,
+     "minimum": 0,
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "find_sap_services",
+  "outputSchema": {
+   "description": "Generic wrapper for non-object return types.",
+   "properties": {
+    "result": {
+     "anyOf": [
+      {
+       "properties": {
+        "data": {
+         "anyOf": [
+          {
+           "items": {
+            "additionalProperties": true,
+            "type": "object"
+           },
+           "type": "array"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "List of SAP services found"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "description": "Indicates if the request was successful",
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "success"
+       ],
+       "type": "object"
+      },
+      {
+       "description": "Response model for authentication errors that require user federation.",
+       "properties": {
+        "data": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Authentication error details including auth URL"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "default": false,
+         "description": "Always False for authentication errors",
+         "type": "boolean"
+        }
+       },
+       "type": "object"
+      }
+     ]
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  }
+ },
+ {
+  "annotations": {
+   "readOnlyHint": true
+  },
+  "description": "DESCRIPTION: Retrieves OData service metadata from SAP systems with configurable detail levels. This tool fetches structured information about entity types, properties, relationships, and schema definitions for a specified SAP/OData service.\n\nMODES: The tool supports four rendering modes to control the level of detail returned:\n- brief: Returns only entity type names and basic service information. Ideal when dealing with multiple services (4+) at once for a high-level overview.\n- core: Default mode. Provides detailed entity information including properties, data types, key fields, and basic attributes. Excludes navigation properties and annotations to keep response focused. Best for understanding entity structure when working with 1-2 services.\n- rich: Provides complete metadata including navigation properties, annotations, and schema-level metadata. Use when you need complete understanding of entity relationships and SAP-specific annotations. Output size can be very large for this mode.\n- xml: Returns the raw XML metadata without any parsing or processing. Use when you need the original XML format for external processing or debugging purposes. Output size can be very large for this mode.\n\nRETURNS: A GetMetadataToolResponse with the following structure:\n- success: Boolean indicating if the request was successful\n- message: A simple message about the response\n- data: OData Service Metadata containing version, schemas, entitySets, and entityTypes. The data field may be empty if an error occurs\n\nThe data field contains:\n1. version \u2014 OData service version\n2. schemas \u2014 List of available schema namespaces\n3. entitySets \u2014 Array of entity sets with their names and associated entity types\n4. entityTypes \u2014 Detailed entity type information that varies by mode (brief shows only names, core shows properties and structure, rich includes navigation properties and annotations)",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "mode": {
+     "default": "core",
+     "description": "Metadata detail level: 'brief' (entity names only, ideal for 4+ services), 'core' (detailed properties and structure, best for 1-2 services), 'rich' (complete metadata with navigation properties and annotations), 'xml' (raw XML metadata without parsing)",
+     "enum": [
+      "brief",
+      "core",
+      "rich",
+      "xml"
+     ],
+     "type": "string"
+    },
+    "service_name": {
+     "description": "The name of the SAP/OData Service to retrieve metadata for",
+     "type": "string"
+    }
+   },
+   "required": [
+    "service_name"
+   ],
+   "type": "object"
+  },
+  "name": "get_metadata",
+  "outputSchema": {
+   "properties": {
+    "data": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "OData Service Metadata"
+    },
+    "message": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Simple human-readable message about the tool response"
+    },
+    "success": {
+     "description": "Indicates if the request was successful",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "success"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "readOnlyHint": true
+  },
+  "description": "DESCRIPTION: Get service-specific hints, known issues, and workarounds for a given SAP OData\nService Name.\n\nRETURNS: An UpdateODataToolResponse containing the operation result:\n- success: Boolean indicating successful update execution\n- message: Descriptive response message with operation details\n- data: Contains hints about the Service Name requested. Can be empty, if no matching Service\nHints are available. Contains known issues, workarounds and field hints",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "service_name": {
+     "description": "Name of the OData Service",
+     "type": "string"
+    }
+   },
+   "required": [
+    "service_name"
+   ],
+   "type": "object"
+  },
+  "name": "get_service_hints",
+  "outputSchema": {
+   "description": "Response model for service hints tool.",
+   "properties": {
+    "data": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "description": "Service hints data structure returned by lookup_service_hints.",
+       "properties": {
+        "field_hints": {
+         "anyOf": [
+          {
+           "items": {},
+           "type": "array"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Field-specific hints and metadata"
+        },
+        "known_issues": {
+         "anyOf": [
+          {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "List of known issues with this service"
+        },
+        "notes": {
+         "anyOf": [
+          {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Additional notes and guidance for using this service"
+        },
+        "workarounds": {
+         "anyOf": [
+          {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "List of workarounds for known issues"
+        }
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Service hints information"
+    },
+    "message": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Simple human-readable message about the tool response"
+    },
+    "metadata": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Additional metadata about the tool response"
+    },
+    "success": {
+     "description": "Indicates if the request was successful",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "success"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "annotations": {
+   "readOnlyHint": true
+  },
+  "description": "DESCRIPTION: Count records efficiently using server-side processing for aggregations and\nstatistical analysis. This tool provides optimized counting capabilities against SAP business\nentities through the OData protocol, delivering 100x better performance than retrieving all\nrecords for local counting.\n\nODATA FILTER PARAMETERS USAGE: Different usage patterns for $filter operations in OData queries:\n\n- Select a range of values: $filter=Entry_No gt 610 and Entry_No lt 615\n  Returns entry numbers 611 through 614.\n\n- In a list of values: $filter=EntryNo in (610, 612, 614)\n  Query that returns entry numbers 610, 612, and 614\n  Note: This only works in $schemaversion=2.1.\n\n- And: $filter=Country_Region_Code eq 'ES' and Payment_Terms_Code eq '14 DAYS'\n  Query on Customer service. Returns customers in Spain where Payment_Terms_Code=14 DAYS.\n\n- Or: $filter= Country_Region_Code eq 'ES' or Country_Region_Code eq 'US'\n  Query on Customer service. Returns customers in Spain and the United States.\n  Alert: You can use OR operators to apply different filters on the same field. However, you can't use OR operators to apply filters on two different fields.\n\n- Less than: $filter=Entry_No lt 610\n  Query on GLEntry service. Returns entry numbers that are less than 610.\n\n- Greater than: $filter= Entry_No gt 610\n  Returns entry numbers 611 and higher.\n\n- Greater than or equal to: $filter=Entry_No ge 610\n  Returns entry numbers 610 and higher.\n\nPARAMETER COMBINATIONS: Effective patterns for complex aggregation queries:\n- Count by field and year: $filter=FieldName eq 'VALUE' and CreationDate ge datetime'YYYY-01-01T00:00:00' and CreationDate le datetime'YYYY-12-31T23:59:59'\n- Navigation-based counting: EntitySet/$count?$filter=Field eq 'value' and to_RelatedEntity/FilterField operator 'criteria'\n- Multiple conditions: (condition1) and (condition2)\n- Date range filtering: ge datetime'start' and lt datetime'end'\n- Multi-value conditions: (field eq 'val1' or field eq 'val2')\n\nUSAGE GUIDELINES:\n- Use this tool instead of odata_read for counting scenarios!\n- Write the filter in the service's OData version (a V4 service's URL has /odata4/; the examples here are V2):\n    - Date ranges, V2: CreationDate ge datetime'2024-01-01T00:00:00'\n    - Date ranges, V4: CreationDate ge 2024-01-01 (Edm.Date) or CreationDate ge 2024-01-01T00:00:00Z (Edm.DateTimeOffset), with no datetime prefix\n    - Multiple values: Field eq 'val1' or Field eq 'val2'\n    - Text match: substringof('val', Field) on V2, contains(Field, 'val') on V4\n    - NO functions: year(), month(), in()\n- COMPLEX AGGREGATION WITH NAVIGATION: Use navigation properties in COUNT filters to aggregate across related entities\n    - Pattern: EntitySet/$count?$filter=Field eq 'value' and to_RelatedEntity/FilterField operator 'criteria'\n    - Navigation Syntax: Use to_EntityName/FieldName to filter on related entity fields\n- Some fields of Integer type need to be padded with zeroes to match the max length of the metadata.\n  For example, if the max length of the field's metadata is 3, then 1 will be padded to 001.\n\nEXAMPLES: Efficient aggregation patterns for business intelligence:\n- Count by year: odata_count(filter_param=\"CreationDate ge datetime'YYYY-01-01T00:00:00' and CreationDate le datetime'YYYY-12-31T23:59:59'\")\n- Vendor validation: odata_count(filter_param=\"VendorName eq 'VENDOR_NAME'\")\n- Count items by parameter per date: Multiple calls with combined filters\n  - odata_count(filter_param=\"Parameter eq 'EXAMPLE' and CreationDate ge datetime'YYYY-01-01T00:00:00' and CreationDate le datetime'YYYY-12-31T23:59:59'\")\n  - odata_count(filter_param=\"Parameter eq 'EXAMPLE' and CreationDate ge datetime'YYYY-01-01T00:00:00' and CreationDate le datetime'YYYY-12-31T23:59:59'\")\n- Count by any field + year: odata_count(filter_param=\"FieldName eq 'VALUE' and CreationDate ge datetime'YYYY-01-01T00:00:00' and CreationDate le datetime'YYYY-12-31T23:59:59'\")\n- This year: \"filter_param\": \"Parameter eq 'EXAMPLE' and CreationDate ge datetime'YYYY-01-01T00:00:00' and CreationDate le datetime'YYYY-12-31T23:59:59'\"\n- Date range: CreationDate ge datetime'YYYY-01-01T00:00:00' and CreationDate le datetime'YYYY-12-31T23:59:59'\n- Multiple years: Use separate odata_count calls for each year\n\nWARNING:\n- Do not retrieve large datasets to aggregate by year/period locally\n- Do no pull all vendor POs to count by year - use filters instead\n\nRETURNS: A ReadODataToolResponse containing aggregated count information with the following components:\n- success: Boolean indicating successful count execution\n- message: Descriptive response message with operation details\n- data: Contains 'count' an Integer representing the number of records matching the filter criteria\n- metadata: Additional information about the count operation",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "entity_set": {
+     "description": "The entity set to count",
+     "type": "string"
+    },
+    "filter": {
+     "default": "None",
+     "description": "OData filter expression",
+     "type": "string"
+    },
+    "service_name": {
+     "description": "The name of the SAP OData service",
+     "type": "string"
+    }
+   },
+   "required": [
+    "service_name",
+    "entity_set"
+   ],
+   "type": "object"
+  },
+  "name": "odata_count",
+  "outputSchema": {
+   "description": "Generic wrapper for non-object return types.",
+   "properties": {
+    "result": {
+     "anyOf": [
+      {
+       "properties": {
+        "data": {
+         "anyOf": [
+          {},
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Main payload of the tool's response"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "description": "Indicates if the request was successful",
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "success"
+       ],
+       "type": "object"
+      },
+      {
+       "description": "Exception raised for OData authentication-related errors.",
+       "properties": {
+        "content_message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null
+        },
+        "error": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null
+        },
+        "error_description": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null
+        },
+        "reason": {
+         "type": "string"
+        },
+        "scope": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null
+        },
+        "status_code": {
+         "type": "integer"
+        },
+        "url": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "status_code",
+        "url",
+        "reason"
+       ],
+       "type": "object"
+      }
+     ]
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  }
+ },
+ {
+  "description": "Create a new entity in the specified OData/SAP entity set.",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "entity_set": {
+     "description": "The entity set to create in",
+     "type": "string"
+    },
+    "payload": {
+     "additionalProperties": true,
+     "description": "JSON payload with entity data to create",
+     "type": "object"
+    },
+    "service_name": {
+     "description": "The name of the SAP OData service",
+     "type": "string"
+    }
+   },
+   "required": [
+    "service_name",
+    "entity_set",
+    "payload"
+   ],
+   "type": "object"
+  },
+  "name": "odata_create",
+  "outputSchema": {
+   "description": "Generic wrapper for non-object return types.",
+   "properties": {
+    "result": {
+     "anyOf": [
+      {
+       "properties": {
+        "data": {
+         "anyOf": [
+          {},
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Main payload of the tool's response"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "description": "Indicates if the request was successful",
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "success"
+       ],
+       "type": "object"
+      },
+      {
+       "description": "Response model for authentication errors that require user federation.",
+       "properties": {
+        "data": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Authentication error details including auth URL"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "default": false,
+         "description": "Always False for authentication errors",
+         "type": "boolean"
+        }
+       },
+       "type": "object"
+      }
+     ]
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  }
+ },
+ {
+  "description": "DESCRIPTION: Executes OData Function Imports on SAP systems to invoke custom server-side\noperations such as calculations, validations, workflows, and business processes. Function Imports\nare remote procedure calls beyond standard CRUD operations.\n\nREQUIRED PARAMETERS:\n- service_name: Name of the OData service (e.g., \"API_SALES_ORDER_SRV\")\n- function_name: Name of the Function Import to execute (e.g., \"CalculateTax\")\n\nDISCOVERING FUNCTION IMPORTS:\n- Use get_metadata with mode=\"rich\" for full details (parameters, types, HTTP methods)\n- Use get_metadata with mode=\"core\" for names, return types, and HTTP methods\n- Use get_metadata with mode=\"brief\" for function names only\n\nUSAGE GUIDELINES:\n- Use get_metadata first to discover available Function Imports\n- Verify required parameters and types from metadata before execution\n\nRETURNS: An ODataFunctionImportToolResponse containing:\n- success: Boolean indicating execution success\n- message: Descriptive response message\n- data: Function return data (varies by function), or None if no return value",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "function_name": {
+     "description": "The name of the Function Import to execute",
+     "type": "string"
+    },
+    "method": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "HTTP method to use: GET or POST. Auto-detected if not specified"
+    },
+    "parameters": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Dictionary of parameter name-value pairs for the function"
+    },
+    "service_name": {
+     "description": "The name of the SAP OData service",
+     "type": "string"
+    },
+    "timeout": {
+     "default": 30,
+     "description": "Request timeout in seconds",
+     "maximum": 300,
+     "minimum": 1,
+     "type": "integer"
+    }
+   },
+   "required": [
+    "service_name",
+    "function_name"
+   ],
+   "type": "object"
+  },
+  "name": "odata_function_import",
+  "outputSchema": {
+   "description": "Generic wrapper for non-object return types.",
+   "properties": {
+    "result": {
+     "anyOf": [
+      {
+       "properties": {
+        "data": {
+         "anyOf": [
+          {},
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Main payload of the tool's response"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "description": "Indicates if the request was successful",
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "success"
+       ],
+       "type": "object"
+      },
+      {
+       "description": "Response model for authentication errors that require user federation.",
+       "properties": {
+        "data": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Authentication error details including auth URL"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "default": false,
+         "description": "Always False for authentication errors",
+         "type": "boolean"
+        }
+       },
+       "type": "object"
+      }
+     ]
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  }
+ },
+ {
+  "annotations": {
+   "readOnlyHint": true
+  },
+  "description": "DESCRIPTION: Executes OData queries against SAP systems to retrieve business data with\nadvanced filtering, sorting, and pagination capabilities. This tool provides direct access to\nSAP business entities through the OData protocol.\n\nODATA SYSTEM QUERY PARAMETERS: Complete reference for OData inline query options supported by SAP systems (V2 syntax where the versions differ; see USAGE GUIDELINES for V4):\n\n- $filter: Server-side filtering to retrieve specific records based on field conditions\n  - Comparison: eq (equals), ne (not equals), gt (greater than), ge (greater or equal), lt (less than), le (less or equal)\n  - Logical: and, or, not\n  - String: startswith, endswith, and substringof on V2 or contains on V4\n  - Date: datetime'YYYY-MM-DDTHH:MM:SS' on V2; 2024-01-01 (Edm.Date) or 2024-01-01T00:00:00Z (Edm.DateTimeOffset) on V4\n  - Examples: $filter=Status eq 'Active', $filter=Amount gt 1000 and Category eq 'Hardware'\n\n- $orderby: Sort results by one or more fields in ascending (asc) or descending (desc) order\n  - Single field: $orderby=CreationDate desc\n  - Multiple fields: $orderby=Category asc, Amount desc\n  - Combine with $top for extremes: $orderby=Amount desc&$top=1\n\n- $top: Limit the number of records returned (equivalent to LIMIT in SQL)\n  - Example: $top=50 (returns first 50 records)\n\n- $skip: Skip a specified number of records (used for pagination)\n  - Combine with $top: $skip=100&$top=50 (records 101-150)\n  - Example: $skip=0&$top=25 (first page), $skip=25&$top=25 (second page)\n\n- $select: Specify which fields to include in the response (projection)\n  - Single field: $select=CustomerName\n  - Multiple fields: $select=CustomerName,Amount,Status\n  - Benefits: Reduces payload size and improves performance\n\n- $expand: Include related entities in a single request (navigation properties)\n  - Single navigation: $expand=OrderItems\n  - Multiple navigations: $expand=OrderItems,Customer\n  - Note: Use carefully as it can significantly increase response size\n\n- $search: Free-text search across searchable fields (OData v4 feature)\n  - Performs full-text search across entity properties marked as searchable\n  - Example: $search=\"john smith\" (searches for \"john smith\" across all searchable fields)\n  - Note: Not universally supported by all SAP OData services\n  - Alternative: Use $filter with substringof for broader compatibility\n  - Syntax: $search=\"search term\" or $search=term (quotes optional for single terms)\n\nPARAMETER COMBINATIONS: Effective patterns for complex queries:\n- Pagination with count: $top=25&$skip=0\n- Filtered search: $filter=Status eq 'Active'&$orderby=CreationDate desc&$top=10\n- Performance optimization: $select=ID,Name,Status&$top=100\n- Related data: $expand=Items&$filter=TotalAmount gt 1000\n- Finding extremes: $orderby + $top\n\nUSAGE GUIDELINES:\n- Results are capped at 100 results at maximum.\n- While searching, use $top / $skip to scroll through all the data. Search isn't complete until all records are completed by pagination\n- Write the filter in the service's OData version (a V4 service's URL has /odata4/; the examples here are V2):\n    - Date ranges, V2: CreationDate ge datetime'2024-01-01T00:00:00'\n    - Date ranges, V4: CreationDate ge 2024-01-01 (Edm.Date) or CreationDate ge 2024-01-01T00:00:00Z (Edm.DateTimeOffset), with no datetime prefix\n    - Multiple values: Field eq 'val1' or Field eq 'val2'\n    - Text match: substringof('val', Field) on V2, contains(Field, 'val') on V4\n    - NO functions: year(), month(), in()\n    Examples: 'Status eq Active', 'Amount gt 1000'\n- Some fields of Integer type need to be padded with zeroes to match the max length of the metadata.\n  For example, if the max length of the field's metadata is 3, then 1 will be padded to 001.\n\nEXAMPLES: Simple use cases to demonstrate the usage\n- Customer with most orders: Group by customer field, count occurrences\n- Most expensive shipment: $orderby=ShipmentAmount desc&$top=1\n- Highest-value customer: $orderby=TotalAmount desc&$top=1\n- Latest transaction: $orderby=CreationDate desc&$top=1\n- Most frequently ordered item: Group by Material/Product, count occurrences\n- Supplier performance: $orderby=DeliveryDate asc for fastest delivery\n\nWARNING:\n- For counts by year/period/vendor, use odata_count with filters instead\n- Don't retrieve all records to count subsets - use server-side filtering\n\nRETURNS: A ReadODataToolResponse containing structured business data with the following components:\n- success: Boolean indicating successful query execution\n- message: Descriptive response message with operation details\n- data: Array of entities matching the query criteria, with each entity containing field values as defined by the SAP data model. This maybe none if the execution failed\n- metadata: record counts",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "entity_set": {
+     "description": "The entity set to read from",
+     "type": "string"
+    },
+    "expand": {
+     "default": "None",
+     "description": "Navigation properties to expand",
+     "type": "string"
+    },
+    "filter": {
+     "default": "None",
+     "description": "OData filter expression",
+     "type": "string"
+    },
+    "orderby": {
+     "default": "None",
+     "description": "Field to order by",
+     "type": "string"
+    },
+    "search": {
+     "default": "None",
+     "description": "Full-text search query",
+     "type": "string"
+    },
+    "select": {
+     "default": "None",
+     "description": "Comma-separated list of fields to select",
+     "type": "string"
+    },
+    "service_name": {
+     "description": "The name of the SAP OData service",
+     "type": "string"
+    },
+    "skip": {
+     "default": -1,
+     "description": "Number of records to skip",
+     "maximum": 100000,
+     "minimum": -1,
+     "type": "integer"
+    },
+    "top": {
+     "default": 0,
+     "description": "Number of records to return. ALWAYS call odata_count first to check total records",
+     "maximum": 100,
+     "minimum": 0,
+     "type": "integer"
+    }
+   },
+   "required": [
+    "service_name",
+    "entity_set"
+   ],
+   "type": "object"
+  },
+  "name": "odata_read",
+  "outputSchema": {
+   "description": "Generic wrapper for non-object return types.",
+   "properties": {
+    "result": {
+     "anyOf": [
+      {
+       "properties": {
+        "data": {
+         "anyOf": [
+          {},
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Main payload of the tool's response"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "description": "Indicates if the request was successful",
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "success"
+       ],
+       "type": "object"
+      },
+      {
+       "description": "Response model for authentication errors that require user federation.",
+       "properties": {
+        "data": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Authentication error details including auth URL"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "default": false,
+         "description": "Always False for authentication errors",
+         "type": "boolean"
+        }
+       },
+       "type": "object"
+      }
+     ]
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  }
+ },
+ {
+  "description": "DESCRIPTION: Updates existing entities in SAP systems through OData protocol with optimistic\nconcurrency control. This tool modifies business data in SAP entity sets using PATCH operations\nwith automatic ETag handling for data consistency and conflict prevention.\n\nREQUIRED PARAMETERS:\n- service_name: Name of the OData service (e.g., \"ZHR_EMPLOYEE_SRV\")\n- entity_set: Name of the entity set containing the entity to update (e.g., \"EmployeeSet\")\n- identifier_fields: Dictionary containing key field(s) that uniquely identify the entity\n- payload: Dictionary containing the updated field values\n\nIDENTIFIER FIELDS: Key fields used to uniquely identify the entity for updates:\n- Single key entity: {\"ID\": \"12345\"} or {\"EmployeeID\": \"EMP001\"}\n- Composite key entity: {\"CompanyCode\": \"1000\", \"EmployeeID\": \"EMP001\", \"Year\": '2024'}\n- String values: Automatically quoted in OData URL (ID='12345')\n- Generated URL patterns:\n  - Single key: /EntitySet('12345') or /EntitySet(12345)\n  - Composite: /EntitySet(CompanyCode='1000',EmployeeID='EMP001',Year='2024')\n\nPAYLOAD STRUCTURE: Contains the fields to be updated with new values:\n- Only include fields that need to be changed\n- Field names must match exactly with entity property names\n- Data types must be compatible with SAP field definitions\n- Examples:\n  - {\"Name\": \"John Smith\", \"Department\": \"IT\", \"Salary\": 75000}\n  - {\"Status\": \"Active\", \"LastModifiedDate\": \"2024-01-15T10:30:00\"}\n\nUPDATE PROCESS: Automatic optimistic concurrency control for data integrity:\n1. Retrieval: Fetches current entity to obtain ETag value\n2. Validation: Ensures entity exists and is accessible\n3. Update: Performs PATCH request with ETag in If-Match header\n4. Response: Returns updated entity data or appropriate error information\n\nUSAGE GUIDELINES:\n- Use get_metadata to understand entity structure and field requirements\n- Include all key fields in identifier_fields for composite key entities\n- Only include fields that need to be changed in the payload\n- String identifiers are automatically quoted for OData URL construction\n- Some fields of Integer type need to be padded with zeroes to match the max length of the metadata.\n  For example, if the max length of the field's metadata is 3, then 1 will be padded to 001.\n\nEXAMPLES: Common update scenarios demonstrating proper usage:\n\nSingle Key Entity Update:\n- identifier_fields: {\"CustomerID\": \"CUST001\"}\n- payload: {\"Name\": \"Updated Customer Name\", \"City\": \"New York\"}\n\nWARNING:\n- identifier_fields cannot be empty - operation will fail with ValueError\n- Ensure payload field names exactly match entity property names\n- Use get_metadata to verify field names and data types before updates\n- Updates with incorrect field names or types will be rejected by SAP\n- Concurrent modifications by other users will cause update conflicts\n\nRETURNS: An UpdateODataToolResponse containing the operation result:\n- success: Boolean indicating successful update execution\n- message: Descriptive response message with operation details\n- metadata: Additional information about the update operation",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "entity_set": {
+     "description": "The entity set to update",
+     "type": "string"
+    },
+    "identifier_fields": {
+     "additionalProperties": true,
+     "description": "Key fields to identify the entity to update",
+     "type": "object"
+    },
+    "payload": {
+     "additionalProperties": true,
+     "description": "JSON payload with updated entity data",
+     "type": "object"
+    },
+    "service_name": {
+     "description": "The name of the SAP OData service",
+     "type": "string"
+    }
+   },
+   "required": [
+    "service_name",
+    "entity_set",
+    "identifier_fields",
+    "payload"
+   ],
+   "type": "object"
+  },
+  "name": "odata_update",
+  "outputSchema": {
+   "description": "Generic wrapper for non-object return types.",
+   "properties": {
+    "result": {
+     "anyOf": [
+      {
+       "properties": {
+        "data": {
+         "anyOf": [
+          {},
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Main payload of the tool's response"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "description": "Indicates if the request was successful",
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "success"
+       ],
+       "type": "object"
+      },
+      {
+       "description": "Response model for authentication errors that require user federation.",
+       "properties": {
+        "data": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Authentication error details including auth URL"
+        },
+        "message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "description": "Simple human-readable message about the tool response"
+        },
+        "metadata": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "description": "Additional metadata about the tool response"
+        },
+        "success": {
+         "default": false,
+         "description": "Always False for authentication errors",
+         "type": "boolean"
+        }
+       },
+       "type": "object"
+      }
+     ]
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  }
+ }
+]

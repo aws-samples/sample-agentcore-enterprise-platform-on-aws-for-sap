@@ -1,0 +1,8 @@
+# A SAP use case with no business process agent, in about twenty lines; tests only.
+name: vendor-lookup
+owner: tests
+summary: Look up a vendor in SAP from a chat client.
+platform_interface: 3
+requires: [auth, gateway, layer-sap]
+stacks: [uc-vendor-lookup]
+gateway_clients: [{name: agent, scopes: [read]}]

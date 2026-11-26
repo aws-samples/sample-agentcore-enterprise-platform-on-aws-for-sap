@@ -1,0 +1,28 @@
+# The manifest is the only file the platform reads about your use case.
+# Everything here is validated at load time (infra_utils/platform_config.py).
+name: claude-3p-on-bedrock       # must match this directory's name
+owner: pasiniap                  # who reviews changes to this folder
+summary: >-
+  Claude Code and Claude Desktop/Cowork on Amazon Bedrock through Anthropic's
+  Claude apps gateway, with Microsoft Entra ID sign-in and per-team model
+  access, on the platform's private network.
+# The docs/PLATFORM_INTERFACE.md version this use case is written against; a mismatch fails the synth.
+platform_interface: 3
+# Core stack suffixes that must exist in the deployment's footprint. The
+# gateway runs in the platform VPC, read from the networking stack's SSM
+# parameters, so the footprint must include `networking`.
+requires: [networking]
+# Stack suffixes this use case adds (full name = <project>-<env>-<suffix>).
+stacks: [uc-claude-3p-on-bedrock]
+# Module exposing build(app, platform_ctx, config). Default: stack.py
+entry: stack.py
+# The pages the platform's entry docs list for this use case (scripts/gen_use_case_index.py).
+docs:
+  title: Claude Code and Cowork on Amazon Bedrock
+  entry: README.md
+  enable: README.md#quick-start
+  quickstart: README.md#quick-start
+  remove: README.md#remove
+  pages:
+    - {title: "Network, Entra ID and devices", path: docs/walkthrough.md}
+    - {title: Changes, path: docs/changes.md}

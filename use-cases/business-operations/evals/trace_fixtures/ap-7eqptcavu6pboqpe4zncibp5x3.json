@@ -1,0 +1,233 @@
+{
+  "case_id": "ap-7eqptcavu6pboqpe4zncibp5x3",
+  "process_type": "invoice_matching",
+  "pack_id": "finance_ops",
+  "note": "First real trace committed. A missing-goods-receipt invoice the agent escalated rather than posting: three odata_read calls against A_PurchaseOrder failed, so it had no PO to match against and correctly reached no write tool. The errored reads are why the recorded verdict is non-empty.",
+  "expected": {
+    "outcome": "manual_review_required",
+    "required_tool_calls": [
+      "get_case_state",
+      "odata_read",
+      "update_case_state"
+    ],
+    "forbidden_tool_calls": [
+      "odata_create",
+      "odata_update",
+      "odata_function_import",
+      "odata_delete"
+    ]
+  },
+  "failures": [
+    "tool calls reported status=error: ['odata_read']"
+  ],
+  "case": {
+    "status": "manual_review_required",
+    "agent_traces": [
+      {
+        "trace_id": "2b51f96f-c6b4-43cf-b613-d301050b50c9",
+        "input_tokens": "24",
+        "prompt": "<elided 106 chars>",
+        "estimated_cost_usd": "0.456551",
+        "initiator": "<elided 27 chars>",
+        "timestamp": "2026-09-08T17:55:15.483829+00:00",
+        "cache_write_tokens": "52870",
+        "trigger": "manual",
+        "latency_ms": "147789",
+        "outcome": "complete",
+        "correlation_id": "424db7b8-bbdb-4799-b004-c5e5475dc6fa",
+        "cache_read_tokens": "338361",
+        "sop_version": "2.1",
+        "output_tokens": "10452",
+        "segments": [
+          {
+            "tool_input": "<elided 50 chars>",
+            "status": "success",
+            "tool_name": "get_case_state",
+            "type": "tool",
+            "tool_result": "<elided 583 chars>",
+            "tool_call_id": "tooluse_RSYHWXnKyZhW4pr1YCx5XL",
+            "evidence": "<elided 407 chars>"
+          },
+          {
+            "type": "text",
+            "content": "<elided 155 chars>"
+          },
+          {
+            "tool_input": "<elided 25 chars>",
+            "evidence": "<elided 157 chars>",
+            "status": "success",
+            "tool_name": "calculator",
+            "type": "tool",
+            "tool_result": "<elided 15 chars>",
+            "tool_call_id": "tooluse_X60eBF5P4FjOt3D8erGRCU"
+          },
+          {
+            "evidence": "<elided 308 chars>",
+            "status": "success",
+            "type": "tool",
+            "tool_input": "<elided 67 chars>",
+            "tool_call_id": "tooluse_1DAbDe4VB5ll6sHUUsSXT7",
+            "tool_name": "search_sap_sops",
+            "tool_result": "<elided 527 chars>"
+          },
+          {
+            "content": "<elided 79 chars>",
+            "type": "text"
+          },
+          {
+            "tool_call_id": "tooluse_meda8DfO5Im44IYQPHYw4l",
+            "tool_result": "<elided 30 chars>",
+            "type": "tool",
+            "evidence": "<elided 191 chars>",
+            "status": "error",
+            "tool_name": "odata_read",
+            "tool_input": "<elided 289 chars>"
+          },
+          {
+            "status": "error",
+            "tool_name": "odata_read",
+            "tool_input": "<elided 289 chars>",
+            "tool_call_id": "tooluse_RP8NZilDFNzWh9rjImnme5",
+            "tool_result": "<elided 30 chars>",
+            "evidence": "<elided 191 chars>",
+            "type": "tool"
+          },
+          {
+            "tool_result": "<elided 30 chars>",
+            "tool_name": "odata_read",
+            "tool_input": "<elided 289 chars>",
+            "evidence": "<elided 189 chars>",
+            "type": "tool",
+            "status": "error",
+            "tool_call_id": "tooluse_Fjqv7eOnDmfUwhISe8b55t"
+          },
+          {
+            "evidence": "<elided 308 chars>",
+            "tool_result": "<elided 526 chars>",
+            "type": "tool",
+            "tool_name": "search_sap_sops",
+            "tool_call_id": "tooluse_wwCvJc1A7nSfecCexxacGw",
+            "status": "success",
+            "tool_input": "<elided 57 chars>"
+          },
+          {
+            "type": "tool",
+            "tool_call_id": "tooluse_xYaEu9vnQ8iZqhOyWha7A6",
+            "tool_name": "search_sap_api_docs",
+            "tool_result": "<elided 32 chars>",
+            "status": "success",
+            "tool_input": "<elided 77 chars>",
+            "evidence": "<elided 140 chars>"
+          },
+          {
+            "type": "tool",
+            "tool_name": "calculator",
+            "tool_input": "<elided 25 chars>",
+            "tool_call_id": "tooluse_Em59WCDGv4P6FCuH8EOBux",
+            "tool_result": "<elided 15 chars>",
+            "evidence": "<elided 157 chars>",
+            "status": "success"
+          },
+          {
+            "type": "tool",
+            "status": "success",
+            "tool_name": "search_sap_api_docs",
+            "tool_call_id": "tooluse_IFMVctIlz4OCKqdVzRivtY",
+            "tool_input": "<elided 79 chars>",
+            "tool_result": "<elided 32 chars>",
+            "evidence": "<elided 140 chars>"
+          },
+          {
+            "tool_result": "<elided 526 chars>",
+            "tool_call_id": "tooluse_Yf2tsny6eX5uDvN4SYnFar",
+            "tool_name": "load_sop",
+            "status": "success",
+            "evidence": "<elided 301 chars>",
+            "tool_input": "<elided 42 chars>",
+            "type": "tool"
+          },
+          {
+            "evidence": "<elided 308 chars>",
+            "status": "success",
+            "tool_call_id": "tooluse_Ua3NS20RQuB8R2r902Lap5",
+            "type": "tool",
+            "tool_name": "search_sap_sops",
+            "tool_input": "<elided 73 chars>",
+            "tool_result": "<elided 527 chars>"
+          },
+          {
+            "tool_call_id": "tooluse_ZyBtldNALw9thCX3JtxjyJ",
+            "status": "success",
+            "tool_result": "<elided 526 chars>",
+            "tool_name": "load_sop",
+            "type": "tool",
+            "tool_input": "<elided 40 chars>",
+            "evidence": "<elided 287 chars>"
+          },
+          {
+            "type": "text",
+            "content": "<elided 639 chars>"
+          },
+          {
+            "tool_call_id": "tooluse_tJByC38ouyP9RCU3OGyhhM",
+            "tool_name": "update_case_state",
+            "tool_result": "<elided 521 chars>",
+            "evidence": "<elided 1489 chars>",
+            "type": "tool",
+            "status": "success",
+            "tool_input": "<elided 301 chars>"
+          },
+          {
+            "type": "text",
+            "content": "<elided 1172 chars>"
+          }
+        ]
+      },
+      {
+        "correlation_id": "a3750b56-8eed-4c42-96cb-1211654166d3",
+        "sop_version": "2.1",
+        "input_tokens": "6",
+        "trace_id": "1936ca29-aaae-43fb-b3eb-60bfa6242e0b",
+        "cache_read_tokens": "36006",
+        "outcome": "complete",
+        "output_tokens": "2644",
+        "prompt": "<elided 106 chars>",
+        "latency_ms": "37213.6",
+        "estimated_cost_usd": "0.131826",
+        "initiator": "<elided 27 chars>",
+        "sop_key": "finance_ops/invoice_matching.txt",
+        "timestamp": "2026-09-09T21:14:25.436896+00:00",
+        "trigger": "manual",
+        "cache_write_tokens": "21697",
+        "segments": [
+          {
+            "type": "text",
+            "content": "<elided 99 chars>"
+          },
+          {
+            "tool_call_id": "tooluse_sNfg2jIAiDD2xMNh7g7r7o",
+            "tool_input": "<elided 50 chars>",
+            "tool_result": "<elided 581 chars>",
+            "evidence": "<elided 406 chars>",
+            "status": "success",
+            "type": "tool",
+            "tool_name": "get_case_state"
+          },
+          {
+            "status": "success",
+            "evidence": "<elided 1914 chars>",
+            "tool_call_id": "tooluse_kkQvBDadCjIdlJqTcTbn9C",
+            "tool_input": "<elided 297 chars>",
+            "tool_name": "update_case_state",
+            "type": "tool",
+            "tool_result": "<elided 579 chars>"
+          },
+          {
+            "content": "<elided 892 chars>",
+            "type": "text"
+          }
+        ]
+      }
+    ]
+  }
+}

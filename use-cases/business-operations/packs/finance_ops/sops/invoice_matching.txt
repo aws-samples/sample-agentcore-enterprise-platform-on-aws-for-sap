@@ -1,0 +1,372 @@
+INVOICE THREE-WAY MATCHING — EXCEPTION RESOLUTION OVERVIEW
+STANDARD OPERATING PROCEDURE (SOP)
+Version 2.9
+
+================================================================================
+PURPOSE
+================================================================================
+
+This SOP defines the overview process for resolving three-way matching
+exceptions in SAP S/4HANA. Three-way matching validates that the purchase
+order (PO), goods receipt (GR), and supplier invoice agree on quantity, price,
+unit of measure, and terms before payment is released.
+
+This is the ENTRY-POINT SOP for generic AP exceptions (process types
+invoice_matching, three_way_match, ap_exception). When the exception type is
+already known, a focused SOP applies instead — see EXCEPTION TYPES below.
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in RFC 2119.
+
+================================================================================
+SCOPE
+================================================================================
+
+Process Types: invoice_matching, three_way_match, ap_exception
+SAP Modules:   MM (Materials Management), FI-AP (Accounts Payable)
+SAP Service:   API_SUPPLIERINVOICE_PROCESS_SRV
+
+Each specific exception type has a dedicated focused SOP that the agent uses
+when the process type is known:
+
+| Exception            | Focused SOP (process_type)     |
+|----------------------|--------------------------------|
+| Price variance       | price_variance                 |
+| Quantity variance    | quantity_variance              |
+| Unit-of-measure diff | uom_mismatch                   |
+| Missing goods receipt| missing_goods_receipt          |
+| Missing / invalid PO | missing_purchase_order         |
+| Duplicate invoice    | duplicate_invoice              |
+
+`short_pay` is a seventh SOP and is deliberately NOT in that table. It is not an
+exception type and the agent MUST NOT classify a case into it: it is the
+resolution a price or quantity approver may choose instead of approving, and it
+is entered only from those two SOPs' over-billing branches with the approver's
+answer already on record.
+
+================================================================================
+PRECONDITIONS
+================================================================================
+
+Before execution, the following MUST be true:
+
+1. The SAP MCP Server is reachable and the agent can read
+   API_SUPPLIERINVOICE_PROCESS_SRV entities.
+2. The case payload contains the supplier invoice number and fiscal year.
+3. The agent MUST NOT treat an earlier run of this case as a source of fact.
+   Conversation history from earlier runs of the same case MAY be restored (it
+   is kept for 30 days), but tool results are not, so every value the agent
+   compares or writes MUST be read from SAP in this run.
+
+================================================================================
+STEP 1: GATHER DATA
+================================================================================
+
+1.1  The agent MUST retrieve from SAP:
+     - Invoice header (A_SupplierInvoice): vendor, amount, currency, invoice
+       date, reference.
+     - Invoice line items: PO reference, quantity, unit price, unit of measure,
+       GL account.
+     - PO header and items (A_PurchaseOrder / A_PurchaseOrderItem): ordered
+       quantity, net price, unit of measure, delivery terms, and
+       GoodsReceiptIsExpected.
+     - Goods receipt documents (A_MaterialDocumentItem, filtered by
+       PurchaseOrder/PurchaseOrderItem): received quantity, movement type.
+       A_MaterialDocumentHeader carries no PurchaseOrder reference or quantity
+       field — it cannot be filtered or read for this.
+     - Prior invoices from the same invoicing party, per clause 1.3.
+
+1.2  IF any required document cannot be retrieved, the agent MUST NOT fabricate
+     it. The agent MUST attempt at least one alternative (filter query,
+     corrected key format) before concluding the document is unavailable.
+
+1.3  DUPLICATE CHECK — MANDATORY, AND IT GATES EVERY RELEASE OR POST. A
+     duplicate looks exactly like a clean match until this read is made, so a
+     clean three-way match is never a reason to skip it.
+     - The agent MUST read A_SupplierInvoice with the filter
+       `InvoicingParty eq '<InvoicingParty>' and SupplierInvoiceIDByInvcgParty
+       eq '<SupplierInvoiceIDByInvcgParty>' and ReverseDocument eq ''`, taking
+       both values from this invoice's own header, and selecting
+       SupplierInvoice, FiscalYear, InvoiceGrossAmount, DocumentCurrency,
+       DocumentDate, PostingDate, SupplierInvoiceStatus, PaymentBlockingReason
+       and ReverseDocument.
+     - `ReverseDocument eq ''` excludes reversed invoices and reversal
+       documents, which share the original's reference but are not a second
+       claim for payment.
+     - IF this invoice's SupplierInvoiceIDByInvcgParty is empty, the agent MUST
+       replace that term with `InvoiceGrossAmount ge <low>M and
+       InvoiceGrossAmount le <high>M`, where low and high are this invoice's
+       InvoiceGrossAmount minus and plus ${{DUPLICATE_MATCH_WINDOW_USD}},
+       computed with the calculator tool.
+     - A single quote inside a filter value MUST be doubled (`O''Brien`), as
+       OData string literals require.
+     - The agent MUST NOT filter on SupplierInvoice for this check, because SAP
+       assigns that number fresh on every posting and a duplicate never shares
+       it.
+     - The agent MUST record in case state the filter it used and how many
+       invoices other than this one it returned.
+     - IF the read returns any invoice other than this one, the exception type
+       is Duplicate invoice, whatever STEP 2 would otherwise find, and the
+       agent MUST call `load_sop` with process_type `duplicate_invoice`.
+
+================================================================================
+STEP 2: IDENTIFY EXCEPTION TYPE
+================================================================================
+
+2.1  The agent MUST compare invoice vs PO vs goods receipt and classify the
+     exception into exactly one type:
+
+     - Quantity variance = |invoice_qty - gr_qty| / gr_qty
+       ABOVE tolerance only when it exceeds BOTH {{QTY_VARIANCE_PCT}}% AND
+       {{QTY_VARIANCE_UNITS}} units. Breaching one limit is WITHIN tolerance.
+     - Price variance = |invoice_price - po_price| / po_price
+       ABOVE tolerance only when it exceeds BOTH {{PRICE_VARIANCE_PCT}}% AND
+       ${{PRICE_VARIANCE_ABS_USD}} per unit. Breaching one limit is WITHIN
+       tolerance.
+     - Unit-of-measure mismatch: invoice UoM differs from PO/GR UoM.
+     - Missing goods receipt: the PO item's GoodsReceiptIsExpected is true
+       and no goods receipt quantity is posted against the PO line.
+     - Missing / invalid PO: invoice references a PO that does not exist or is
+       closed.
+     - Duplicate invoice: the clause 1.3 read returned another invoice from
+       this invoicing party with the same invoice reference.
+
+2.1a The agent MUST classify the item as a missing goods receipt when the PO
+     item's GoodsReceiptIsExpected is true and A_MaterialDocumentItem returns
+     no goods receipt quantity for the PO line, whatever the price and quantity
+     comparisons show.
+     - InvoiceIsGoodsReceiptBased is NOT the test. It says whether invoice
+       verification matches against receipts; it does not say whether goods
+       are expected. A PO item with InvoiceIsGoodsReceiptBased false and
+       GoodsReceiptIsExpected true still needs a goods receipt before the
+       invoice is released.
+     - The agent MUST NOT release such an invoice. It MUST call `load_sop` with
+       process_type `missing_goods_receipt`, which raises a ticket to
+       {{CONTACT_WAREHOUSE}} and waits.
+     - Only when GoodsReceiptIsExpected is false does the PO line need no goods
+       receipt, and then the match is invoice against PO alone.
+
+2.2  Whatever the two-limit tests in clause 2.1 return, the agent MUST classify
+     the item as a variance ABOVE tolerance when the invoice bills more than
+     ${{LINE_AMOUNT_TOLERANCE_USD}} above what the purchase order and the goods
+     receipt support. For a price variance that amount is the per-unit overcharge
+     multiplied by the invoiced quantity; for a quantity variance it is the
+     over-invoiced quantity multiplied by the purchase-order unit price. It is NOT
+     the difference between the invoice total and the PO total, which is also
+     large on a partial invoice that matches the goods receipt exactly.
+
+2.3  The agent MUST NOT apply clause 2.2 to a variance in the buyer's favour,
+     because an undercharge or a short delivery bills nothing extra and the amount
+     clause 2.2 measures is therefore zero.
+
+2.4  The agent MUST NOT apply the dollar limits in clauses 2.1 and 2.2 when the
+     invoice currency is anything other than USD, because those limits are
+     denominated in US dollars, as their symbol names state. The invoice currency
+     is the case attribute `currency`, taken from the invoice's DocumentCurrency.
+     Where this clause applies, the agent MUST still classify the exception type
+     under clause 2.1, and MUST then escalate the case to {{CONTACT_AP_TEAM}} for
+     manual review rather than grading it against tolerance, naming the currency
+     and stating that this SOP declares no limit for it. The agent MUST NOT
+     convert the amount into USD in order to apply a limit, because this SOP
+     declares no exchange rate and a rate the agent chose for itself would settle
+     a material variance on an assumption nobody approved.
+
+2.5  Once the type is identified, the agent MUST call `load_sop` with the
+     matching process_type from the table in SCOPE, then follow that focused
+     SOP's resolution logic in place of STEP 3. The summaries in STEP 3 apply
+     only when `load_sop` is unavailable; if `load_sop` returns an error, the
+     agent MUST record that error in case state before falling back to them.
+
+================================================================================
+STEP 3: APPLY RESOLUTION LOGIC (DEFAULT SUMMARIES)
+================================================================================
+
+3.1  FOR QUANTITY VARIANCE:
+  IF within tolerance → auto-accept, post invoice.
+  IF above tolerance AND invoice_qty < gr_qty → auto-accept (under-delivery).
+  IF above tolerance AND invoice_qty > gr_qty → raise an approval ticket to the
+    buyer at {{CONTACT_PROCUREMENT}} with PO#, invoice#, quantity difference, and
+    $ impact, offering both answers: approve as billed, or short pay the supported
+    quantity. STOP and wait for the decision. IF the decision is short pay →
+    `load_sop` `short_pay`.
+
+3.2  FOR PRICE VARIANCE:
+  IF within tolerance → auto-accept, post invoice.
+  IF above tolerance → raise an approval ticket to {{CONTACT_PROCUREMENT}},
+    offering both answers as in 3.1. STOP and wait for the decision. IF the
+    decision is short pay → `load_sop` `short_pay`.
+
+3.3  FOR UNIT-OF-MEASURE MISMATCH:
+  Attempt UoM conversion using the PO/material conversion factor. IF conversion
+  reconciles quantity within {{QTY_VARIANCE_PCT}}% → proceed. Otherwise raise a
+  free-text ticket to {{CONTACT_PROCUREMENT}} asking for the conversion factor.
+
+3.4  FOR MISSING GOODS RECEIPT:
+  IF the PO schedule line's ScheduleLineDeliveryDate is today or later → raise a ticket to
+    {{CONTACT_WAREHOUSE}} naming the re-check date
+    ({{GOODS_IN_TRANSIT_REMINDER_DAYS}} business days out). The agent has no
+    timer and MUST NOT promise to revisit the case itself.
+  IF no receipt after {{MISSING_GR_ESCALATION_DAYS}} business days → hand the
+    case to {{CONTACT_PROCUREMENT}}, whose buyer chases the supplier, and mark it
+    for manual review.
+
+3.5  FOR MISSING / INVALID PO:
+  Verify PO number format (leading zeros, company code). IF still missing →
+    raise a free-text ticket to {{CONTACT_PROCUREMENT}} asking for the correct
+    PO. STOP and wait.
+
+3.6  FOR DUPLICATE INVOICE:
+  Compare amounts, dates, line items with the original. IF exact duplicate →
+    reject and notify the vendor. IF different amounts → raise an approval
+    ticket to {{CONTACT_AP_TEAM}}. STOP and wait.
+
+================================================================================
+STEP 4: EXECUTE RESOLUTION
+================================================================================
+
+4.0  The agent MUST NOT call Release or Post until the clause 1.3 duplicate
+     check has been made in this run and returned no invoice other than this
+     one. IF it has not been made, the agent MUST make it before the write,
+     whichever SOP brought the agent to this step.
+
+4.0a The one exception to clause 4.0 applies only when all three hold: this
+     run's prompt names the ticket it resumed on and states "Ticket category:
+     duplicate_review", the prompt states that ticket has been approved, and
+     the clause 1.3 read returns no invoice other than this one and the
+     originals that ticket names. The agent MUST NOT infer the category from
+     the ticket's title, description or any other free text. AP has then
+     decided the invoice is a separate claim, so those originals MUST NOT
+     block the write duplicate_invoice clause 3.2 calls for. A prompt with no
+     category line, any other category, or any other matching invoice
+     re-engages clause 4.0.
+
+4.1  The agent MUST NOT attempt to park the invoice — the service exposes no
+     Park function import. The invoice already exists in SAP, so which verb
+     applies is decided by the invoice_status attribute on the case
+     (SupplierInvoiceStatus), never guessed:
+     - IF invoice_status is '5' the invoice is posted. The agent MUST clear the
+       block with the Release function import once any required approval is
+       confirmed.
+     - IF invoice_status is absent or empty, the poller did not supply it. The
+       agent MUST read it from the invoice header before choosing a verb, and
+       MUST NOT choose one without it.
+     - IF invoice_status holds any other value, the agent MUST NOT infer which
+       verb applies. '5' is the only value this landscape has been observed to
+       return, and the service publishes no value set for this field — so
+       "not '5'" does not establish that the document is parked and awaiting a
+       Post; it is equally consistent with a document that is reversed,
+       cancelled, or already cleared, none of which Post may touch. The agent
+       MUST raise a free-text ticket to {{CONTACT_AP_TEAM}} naming the status
+       value it read, MUST update case state to "awaiting_human_input", and
+       STOP.
+     The agent MUST NOT attempt both verbs, and MUST NOT retry one after the
+     other refuses — see 4.4.
+4.2  The agent MUST update case state at each step.
+4.3  IF an SAP write fails, the agent MUST update the case to 'error', notify
+     {{CONTACT_AP_TEAM}} with the error detail, and STOP.
+4.4  Release clears an invoice-verification block, which SAP records per item at
+     posting. A block held only as a header payment reason has no such entry, so
+     SAP refuses the Release with "Invoice is not blocked and cannot be released
+     therefore" (MRM_BASE/000). This service exposes no other verb that clears a
+     header payment reason — there is no PATCH on A_SupplierInvoice, and Post
+     does not apply to an already-posted document. The agent MUST report that
+     refusal verbatim as the reason the write did not happen, MUST NOT retry it,
+     MUST NOT substitute Cancel for it, and MUST NOT report the invoice as
+     released unless clause 4.4a finds the block cleared. The resolution
+     decision reached in STEP 3 stands and MUST be stated as reached; only its
+     execution is unavailable, and clearing such a block is a human action in
+     SAP.
+4.4a The header PaymentBlockingReason on A_SupplierInvoice is the value recorded
+     at posting. SAP does not clear it when the invoice is released, by Release
+     or by SAP's own automatic release of a within-tolerance invoice, so a
+     header that still reads 'R' does not show that the invoice is still
+     blocked. The payable item's block is not readable through this pack's
+     services. SAP releases a within-tolerance invoice on its own, sometimes
+     before the agent's Release arrives.
+     - IF STEP 3 graded every variance on the invoice WITHIN tolerance, and no
+       ticket on this case asked to hold or short pay the invoice, the
+       MRM_BASE/000 refusal is SAP's report that no invoice-verification block
+       remains. The agent MUST record that SAP had already released the invoice
+       before the Release call, MUST quote the refusal text as the evidence,
+       MUST NOT call Release again, and MUST close the case per STEP 5.
+     - IF any variance was ABOVE tolerance, or a ticket asked to hold or short
+       pay the invoice, clause 4.4 governs, and the agent MUST update case
+       state to "manual_review_required" and STOP.
+4.5  The agent MUST send confirmation notifications only after a write succeeds.
+
+================================================================================
+STEP 5: CLOSE CASE
+================================================================================
+
+5.1  The agent MUST verify all line items are resolved.
+5.2  The agent MUST update case status to 'complete'.
+5.3  The agent SHOULD send a summary notification to the relevant stakeholders.
+
+================================================================================
+ESCALATION RULES
+================================================================================
+
+E.1  Whenever this SOP or a focused SOP has the agent wait on a human's answer,
+     the agent MUST raise a ticket to the named contact, MUST update case state
+     to "awaiting_human_input", and MUST then STOP.
+
+E.2  The ticket MUST state the question, the facts the human needs to answer
+     it (document numbers, amounts, the variance and the limit it breaches),
+     and the response it needs.
+
+E.3  A decision on a proposed action — a variance above tolerance, a write
+     above the approval ceiling, posting a suspected duplicate — MUST be asked
+     for with an approval ticket, never a free-text one.
+
+E.4  A free-text ticket is for information the agent needs back, such as a
+     PO number, a received quantity, or a conversion factor.
+
+E.5  The agent MUST NOT use a notification to ask a question or request a
+     decision, because a notification cannot be answered and a case waiting on
+     one never resumes. Notifications are for information only.
+
+================================================================================
+CONTACTS
+================================================================================
+
+- AP Team:              {{CONTACT_AP_TEAM}}
+- Procurement:          {{CONTACT_PROCUREMENT}}
+- Warehouse/Receiving:  {{CONTACT_WAREHOUSE}}
+- Finance Approvals:    {{CONTACT_FINANCE_APPROVALS}}
+
+================================================================================
+TOLERANCES (CONFIGURABLE — DECLARED IN packs/finance_ops/pack.json)
+================================================================================
+
+Values are resolved at runtime from the skill's `constants` block; this table
+lists symbols only.
+
+| Parameter                          | Symbol                             |
+|------------------------------------|------------------------------------|
+| Quantity variance — percentage     | {{QTY_VARIANCE_PCT}}               |
+| Quantity variance — absolute units | {{QTY_VARIANCE_UNITS}}             |
+| Price variance — percentage        | {{PRICE_VARIANCE_PCT}}             |
+| Price variance — absolute (USD)    | {{PRICE_VARIANCE_ABS_USD}}         |
+| Amount tolerance per line (USD)    | {{LINE_AMOUNT_TOLERANCE_USD}}      |
+| Duplicate-match window (USD)       | {{DUPLICATE_MATCH_WINDOW_USD}}     |
+| Missing GR escalation (days)       | {{MISSING_GR_ESCALATION_DAYS}}     |
+| Goods-in-transit reminder (days)   | {{GOODS_IN_TRANSIT_REMINDER_DAYS}} |
+| Supplier dispute window (days)     | {{SHORT_PAY_DISPUTE_WINDOW_DAYS}}  |
+
+================================================================================
+REVISION HISTORY
+================================================================================
+
+| Version | Date | Author | Changes |
+|---|---|---|---|
+| 1.0 | 2025-06-08 | (initial) | Comprehensive three-way match SOP |
+| 2.0 | 2026-07-21 | Pack author | Split into focused SOPs; tolerances as constants |
+| 2.1 | 2026-08-18 | Pack author | GR lookup on A_MaterialDocumentItem, not the header |
+| 2.2 | 2026-09-11 | Pack author | LINE_AMOUNT_TOLERANCE_USD floor (2.2) for over-billing only (2.3) |
+| 2.3 | 2026-09-11 | Pack author | 2.4: no USD limits on a non-USD invoice |
+| 2.4 | 2026-09-11 | Pack author | short_pay named as a resolution, never a classification |
+| 2.6 | 2026-10-23 | Pack author | Tickets for every ask (E.1-E.5); duplicate check gates writes (1.3, 4.0, 4.0a); GoodsReceiptIsExpected decides a missing GR (2.1a) |
+| 2.7 | 2026-10-23 | Pack author | 4.4a: re-read the block after a "not blocked" Release refusal |
+| 2.8 | 2026-10-27 | Pack author | 4.4a: the header block is a posting value Release never clears; a within-tolerance "not blocked" refusal means SAP already released |
+| 2.9 | 2026-11-04 | Pack author | The schedule line's field is ScheduleLineDeliveryDate (operator-approved) |

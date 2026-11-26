@@ -1,0 +1,7 @@
+# A use case for tests/test_layers.py that requires the demo layer.
+name: needs-demo
+owner: tests
+summary: Test use case requiring a layer.
+platform_interface: 3
+requires: [gateway, layer-demo]
+stacks: [uc-needs-demo]

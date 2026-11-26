@@ -1,0 +1,98 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Run event streaming</title>
+<link rel="stylesheet" href="diagram.css">
+<style>
+  body { --w: 1416px; } .hops { --cols: 5; --gap: 120px; }
+  .matrix { row-gap: 26px; }
+</style>
+
+<p class="kicker">SAP exception handling</p>
+<h1>Run event streaming <em>— the console subscribes to a channel, not a response body</em></h1>
+
+<div id="canvas">
+  <svg id="wires"></svg>
+
+  <div class="phases hops">
+    <div class="phase">Trigger</div>
+    <div class="phase">Invoker</div>
+    <div class="phase core">Run</div>
+    <div class="phase">Event delivery</div>
+    <div class="phase">Consumer</div>
+  </div>
+
+  <div class="hops matrix">
+    <div class="tile" id="api" style="grid-row: 1; grid-column: 1">
+      <img src="icons/apigw.svg" alt="">
+      <div class="lab">Console: <code>POST /runs</code></div><div class="sub"><code>intent</code> <code>ask</code> (read-only, the default) or <code>process</code>; answers 202</div>
+    </div>
+    <div class="tile" id="queue" style="grid-row: 3; grid-column: 1">
+      <img src="icons/sqs.svg" alt="">
+      <div class="lab">Agent queue</div><div class="sub">SQS FIFO, unattended work</div>
+    </div>
+
+    <div class="tile" id="invoker" style="grid-row: 2; grid-column: 2">
+      <img src="icons/lambda.svg" alt="">
+      <div class="lab">Invoker</div><div class="sub">writes the run grant, then invokes</div>
+    </div>
+
+    <div class="tile core" id="runtime" style="grid-row: 2; grid-column: 3">
+      <img src="icons/agentcore.svg" alt="">
+      <div class="lab">AgentCore Runtime</div><div class="sub">the agent emits AG-UI events</div>
+    </div>
+
+    <div class="tile" id="body" style="grid-row: 1; grid-column: 4">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <path d="M5 2.8h9.4L19 7.4v13.8H5z"/><path d="M14.4 2.8v4.6H19"/>
+        <path d="M8.2 12.4h7.6"/><path d="M8.2 16.2h4.6"/></svg>
+      <div class="lab">The response body</div><div class="sub">read by the invoker, whose last event settles the run</div>
+    </div>
+    <div class="tile" id="channel" style="grid-row: 3; grid-column: 4">
+      <img src="icons/appsync.svg" alt="">
+      <div class="lab">AppSync Events channel</div><div class="sub">one per case, or per chat session</div>
+    </div>
+
+    <div class="tile" id="console" style="grid-row: 3; grid-column: 5">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <rect x="2.8" y="4" width="18.4" height="12.8" rx="1.6"/><path d="M8.4 20.4h7.2"/><path d="M12 16.8v3.6"/></svg>
+      <div class="lab">Console</div><div class="sub">the case page and the assistant: orders, dedups, renders</div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="card">
+    <div class="lab">Channel, not response body</div>
+    <ul>
+      <li>Whoever started the run, the console watches the channel, so a second tab or a reload picks it up mid-run.</li>
+      <li>A run outlives an API Gateway request by minutes, which is why <code>POST /runs</code> hands it to the invoker and returns.</li>
+      <li>A question (<code>ask</code>) streams the same way, but its grant lets it write nothing; only <b>Process</b> and a resume after a decision may write.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="lab">Publish and subscribe permissions</div>
+    <ul>
+      <li>Only the runtime's role publishes (IAM); the browser holds no IAM credentials, so it cannot forge an event.</li>
+      <li>Subscribe needs the console's own token, and <code>run_events_auth</code> admits a case channel only on a pack the user may see.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="legend">
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 10% 55%)" stroke-width="1.5"/></svg><b>A run</b></span>
+  <span>Purple = the run every path goes through</span>
+</div>
+
+<script>
+const EDGES = [
+  ["api",     "invoker", "hvh", 60, "invoked async",          "", 1],
+  ["queue",   "invoker", "hvh", 60, "one message per case",   "", 1],
+  ["invoker", "runtime", "h",    0, "POST /invocations",      "", 2],
+  ["runtime", "body",    "hvh", 60, "event stream",           "", 3],
+  ["runtime", "channel", "hvh", 60, "each event, again",      "", 3],
+  ["channel", "console", "h",    0, "subscribed per pack",    "", 4],
+];
+</script>
+<script src="diagram.js"></script>

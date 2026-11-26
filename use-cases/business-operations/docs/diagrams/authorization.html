@@ -1,0 +1,110 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Tool call authorization</title>
+<link rel="stylesheet" href="diagram.css">
+<style>body { --w: 1640px; } .hops { --cols: 6; --gap: 96px; }</style>
+
+<p class="kicker">SAP exception handling</p>
+<h1>Tool call authorization <em>— four checks between the agent and SAP</em></h1>
+
+<div id="canvas">
+  <svg id="wires"></svg>
+
+  <div class="phases hops">
+    <div class="phase core">Caller</div>
+    <div class="phase">Gateway</div>
+    <div class="phase emph" style="grid-column: 3 / 5">Interceptor, before Cedar</div>
+    <div class="phase emph">Cedar</div>
+    <div class="phase">Target</div>
+  </div>
+
+  <div class="hops">
+    <div class="tile core" id="run">
+      <img src="icons/agentcore.svg" alt="">
+      <div class="lab">Agent run</div><div class="sub">the <code>writer</code> client's token, its run id and grant secret</div>
+    </div>
+    <div class="tile" id="gateway">
+      <img src="icons/agentcore.svg" alt="">
+      <div class="lab">AgentCore Gateway</div><div class="sub">admits only its allowed clients</div>
+    </div>
+    <div class="tile gate" id="sapcheck">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <path d="M12 2.6l7.6 3v6.1c0 4.6-3.2 8.2-7.6 9.7-4.4-1.5-7.6-5.1-7.6-9.7V5.6z"/>
+        <path d="M8.6 12.2l2.4 2.4 4.4-4.8"/></svg>
+      <div class="lab">SAP layer check</div><div class="sub"><code>sap-*</code> calls: within the caller's SAP claim; never <code>odata_delete</code></div>
+    </div>
+    <div class="tile gate" id="runchecks">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <path d="M12 2.6l7.6 3v6.1c0 4.6-3.2 8.2-7.6 9.7-4.4-1.5-7.6-5.1-7.6-9.7V5.6z"/>
+        <path d="M8.6 12.2l2.4 2.4 4.4-4.8"/></svg>
+      <div class="lab">The use case's run checks</div><div class="sub">a live run grant, for the agent's reads too; the case's own document; the amount limit</div>
+    </div>
+    <div class="tile gate" id="cedar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <rect x="4.6" y="10.4" width="14.8" height="10.2" rx="1.6"/><path d="M8 10.4V7.4a4 4 0 0 1 8 0v3"/></svg>
+      <div class="lab">Cedar policy</div><div class="sub">a permit per tool and scope</div>
+    </div>
+    <div class="tile" id="target">
+      <img src="icons/lambda.svg" alt="">
+      <div class="lab">The tool</div><div class="sub">a case, SOP or notification Lambda, or the AWS for SAP MCP Server</div>
+    </div>
+  </div>
+
+  <div class="hops band">
+    <div class="tile gate" id="approver" style="grid-column: 4">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.6c0-4 3.2-6.4 7.2-6.4s7.2 2.4 7.2 6.4"/></svg>
+      <div class="lab">An approver</div><div class="sub">in <code>approve_groups</code>; the invoker copies the write to the grant</div>
+    </div>
+    <div class="tile loose" id="sap" style="grid-column: 6">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <ellipse cx="12" cy="5.4" rx="7.8" ry="2.9"/>
+        <path d="M4.2 5.4v13.2c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9V5.4"/>
+        <path d="M4.2 12c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9"/></svg>
+      <div class="lab">SAP</div><div class="sub">OData, with the system's configured credentials</div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="card">
+    <div class="lab">Independent checks</div>
+    <ul>
+      <li>A refusal comes back to the agent as a tool error, and the target is never called.</li>
+      <li>The SAP layer check and the run checks hold in every Cedar mode, so they are the gate while Cedar is off.</li>
+      <li>The run checks see only <code>business-operations-*</code> and <code>sap-*</code> calls. Every call to this use case's own tools needs a run grant; on <code>sap-*</code> they decide only for this use case's clients.</li>
+      <li>The agent's SAP reads need a live grant too, held to its packs' <code>sap_system</code>; the operator's <code>reader</code> reads without one. The invoker deletes a grant when its run ends.</li>
+      <li>Where a pack declares <code>write_amount_field</code>, the write's own amount is held to the case's amount and the limit.</li>
+      <li>With <code>security.egress_request_action: block</code>, the egress guardrail refuses a <code>tools/call</code> it would rewrite instead of masking it.</li>
+    </ul>
+  </div>
+  <div class="card gate">
+    <div class="lab">Tenant isolation</div>
+    <ul>
+      <li>Off by default on the platform, and <code>LOG_ONLY</code> when first enabled: in both, Cedar refuses nothing. This use case's example config (<code>platform.example.yaml</code>) sets <code>ENFORCE</code>.</li>
+      <li><code>ENFORCE</code>, which <code>deployment.mode: production</code> requires, keeps the <code>reader</code> client from writing and hides any tool no permit allows.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="legend">
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 10% 55%)" stroke-width="1.5"/></svg><b>One tool call</b></span>
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 12% 72%)" stroke-width="1.5" stroke-dasharray="6 5"/></svg>Only above the amount limit</span>
+  <span>Amber = can refuse the call</span>
+  <span>Dashed border = SAP</span>
+</div>
+
+<script>
+const EDGES = [
+  ["run",      "gateway",  "h",   0, "tools/call",      "",     1],
+  ["gateway",  "sapcheck", "h",   0, "valid token",     "",     2],
+  ["sapcheck", "runchecks",    "h",   0, "claimed",         "",     3],
+  ["runchecks",    "cedar",    "h",   0, "granted",         "",     4],
+  ["cedar",    "target",   "h",   0, "permitted",       "",     5],
+  ["target",   "sap",      "v",   0, "SAP tools only",  "",     6],
+  ["approver", "runchecks",    "vup", 0, "approved_write",  "dash", 3],
+];
+</script>
+<script src="diagram.js"></script>

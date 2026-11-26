@@ -1,1 +1,170 @@
+Agentic Business Platform Accelerator for SAP on AWS
+Built on the Enterprise Agentic AI Platform Accelerator
+(https://github.com/aws-samples/sample-agentcore-enterprise-platform), whose own
+NOTICE names it the AgentCore Platform and Security Accelerator.
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+This product includes software adapted from the Fullstack Solution Template
+for AgentCore (FAST), licensed under the Apache License, Version 2.0:
+https://github.com/awslabs/fullstack-solution-template-for-agentcore
+
+SAP, SAP S/4HANA, SAP NetWeaver, SAP Business Technology Platform (SAP BTP),
+ABAP and other SAP products and services mentioned in this software are the
+trademarks or registered trademarks of SAP SE or its affiliates in Germany and in
+other countries. This software is not affiliated with, sponsored by or endorsed
+by SAP SE.
+
+**********************
+THIRD PARTY COMPONENTS
+**********************
+
+This software declares the following third-party components as dependencies,
+grouped by license. Each license and copyright holder is taken from the
+package's own metadata and license file.
+
+================================================================================
+Apache License 2.0
+================================================================================
+
+The following components are licensed under the Apache License, Version 2.0.
+You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
+  - aws-cdk-lib — Copyright Amazon.com, Inc. or its affiliates
+  - aws-opentelemetry-distro — Copyright Amazon.com, Inc. or its affiliates
+  - bedrock-agentcore — Copyright Amazon.com, Inc. or its affiliates
+  - bedrock-agentcore-starter-toolkit — Copyright Amazon.com, Inc. or its affiliates
+  - boto3 — Copyright Amazon.com, Inc. or its affiliates
+  - botocore — Copyright Amazon.com, Inc. or its affiliates
+  - constructs — Copyright Amazon.com, Inc. or its affiliates
+  - strands-agents — Copyright Amazon.com, Inc. or its affiliates
+  - strands-agents-builder — Copyright Amazon.com, Inc. or its affiliates
+  - strands-agents-tools — Copyright Amazon.com, Inc. or its affiliates
+  - requests — Copyright Kenneth Reitz
+  - python-multipart — Copyright Andrew Dunham
+  - uv — Copyright Astral Software Inc. (MIT OR Apache-2.0)
+  - cryptography — Copyright The Python Cryptographic Authority and individual contributors (Apache-2.0 OR BSD-3-Clause)
+  - class-variance-authority — Copyright Joe Bell
+  - oidc-client-ts — Copyright Brock Allen, Dominick Baier
+
+================================================================================
+MIT License
+================================================================================
+
+The following components are licensed under the MIT License.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the
+Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+  - ag-ui-protocol — Copyright Markus Ecker
+  - ag-ui-strands — Copyright AG-UI Contributors
+  - claude-agent-sdk — Copyright Anthropic, PBC
+  - copilotkit — Copyright Atai Barkai
+  - fastapi — Copyright Sebastián Ramírez
+  - httptools — Copyright MagicStack Inc.
+  - langchain — Copyright LangChain, Inc.
+  - langchain-aws — Copyright LangChain
+  - langchain-mcp-adapters — Copyright LangChain, Inc.
+  - langgraph — Copyright LangChain, Inc.
+  - langgraph-checkpoint-aws — Copyright LangChain
+  - langgraph-prebuilt — Copyright LangChain, Inc.
+  - mcp — Copyright Anthropic, PBC
+  - pydantic — Copyright Pydantic Services Inc. and individual contributors
+  - PyJWT — Copyright José Padilla
+  - PyYAML — Copyright Ingy döt Net, Kirill Simonov
+  - urllib3 — Copyright Andrey Petrov and contributors
+  - @base-ui/react — Copyright Material-UI SAS
+  - @codemirror/autocomplete — Copyright Marijn Haverbeke and others
+  - @codemirror/commands — Copyright Marijn Haverbeke and others
+  - @codemirror/state — Copyright Marijn Haverbeke and others
+  - @codemirror/view — Copyright Marijn Haverbeke and others
+  - @tanstack/react-query — Copyright Tanner Linsley
+  - cmdk — Copyright Paco Coursey
+  - cn — Copyright shadcn
+  - shadcn/ui, the component source in the console's src/components/ui — Copyright shadcn
+  - react — Copyright Meta Platforms, Inc. and affiliates
+  - react-dom — Copyright Meta Platforms, Inc. and affiliates
+  - react-markdown — Copyright Espen Hovlandsdal
+  - react-oidc-context — Copyright pamapa
+  - react-router — Copyright React Training LLC, Remix Software Inc.
+  - remark-gfm — Copyright Titus Wormer
+  - sonner — Copyright Emil Kowalski
+
+================================================================================
+ISC License
+================================================================================
+
+The following components are licensed under the ISC License.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
+  - lucide-react — Copyright Lucide Contributors; portions Cole Bemis (Feather, MIT)
+
+================================================================================
+BSD 3-Clause License
+================================================================================
+
+  - colorama — Copyright Jonathan Hartley
+  - uvicorn — Copyright Encode OSS Ltd
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+* Neither the name of the copyright holder nor the names of its contributors
+  may be used to endorse or promote products derived from this software
+  without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
+SIL Open Font License 1.1
+================================================================================
+
+The following fonts are licensed under the SIL Open Font License, Version 1.1.
+You may obtain a copy of the License at https://openfontlicense.org
+
+  - @fontsource-variable/geist — Copyright 2024 The Geist Project Authors
+  - @fontsource-variable/geist-mono — Copyright 2024 The Geist Project Authors
+
+================================================================================
+
+For the full text of each license, see the LICENSE file in each component's
+source distribution or its project homepage.

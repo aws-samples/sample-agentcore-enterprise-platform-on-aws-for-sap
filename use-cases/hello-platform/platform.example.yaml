@@ -1,0 +1,7 @@
+# hello-platform: its entry for platform.yaml. Merge it into the file that `deploy.sh design`
+# wrote (walkthrough.md, "Enable"). Any preset works as a base.
+
+use_cases:
+  # The operator sets this. The use case defines its own keys; it reads one, optional.
+  hello-platform:
+    greeting: ciao

@@ -1,0 +1,2528 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# deploy.sh is an orchestrator, not an interactive AWS CLI session. A caller's
+# pager setting can otherwise trap the deployment summary in repeated `less`
+# screens (observed during the live G0 migration).
+export AWS_PAGER=""
+
+# ── Bash version check (must run before any bash-4 syntax like `declare -A`) ──
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+    echo "ERROR: This script requires bash 4 or newer (you are running bash ${BASH_VERSION})." >&2
+    echo "" >&2
+    echo "macOS ships bash 3.2 as /bin/bash. To fix:" >&2
+    echo "  1. brew install bash" >&2
+    echo "  2. Run the script with the new bash explicitly:" >&2
+    echo "       bash scripts/deploy.sh deploy" >&2
+    echo "     (or open a new terminal / run 'hash -r' so your PATH picks up" >&2
+    echo "      the Homebrew bash at /opt/homebrew/bin/bash or /usr/local/bin/bash)" >&2
+    exit 1
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# deploy.sh: the platform's one dispatcher
+# ═══════════════════════════════════════════════════════════════
+#
+# Usage:
+#   ./deploy.sh deploy [--stack STACK] [--profile PROFILE] [--team TEAM] [--module N] [--hotswap]
+#   ./deploy.sh workshop [--profile PROFILE] [--from MODULE] [--dry-run]
+#   ./deploy.sh destroy [--stack STACK]
+#   ./deploy.sh verify                         # Live checks for this config (scripts/verify.py)
+#   ./deploy.sh synth
+#   ./deploy.sh diff
+#   ./deploy.sh export
+#   ./deploy.sh ls                             # List the stacks this config produces
+#   ./deploy.sh config [--reset]
+#   ./deploy.sh doctor                         # Read-only customer preflight
+#   ./deploy.sh migrate plan [--profile PROFILE]
+#   ./deploy.sh migrate readiness
+#   ./deploy.sh migrate data plan|readiness
+#   ./deploy.sh migrate cutover plan|readiness
+#   ./deploy.sh design [--profile PROFILE]    # Design: manifest + plan, nothing deployed
+#   ./deploy.sh design --journey J --topology T --posture P [--region R]
+#   ./deploy.sh build                          # Build:  = deploy
+#   ./deploy.sh usecase new NAME | list        # Build:  scaffold a use case
+#   ./deploy.sh usecase add GIT-URL|PATH [--ref REF]  # Build: copy one in, merge its config
+#   ./deploy.sh usecase remove NAME            # Build:  delete its folder and links; no AWS
+#   ./deploy.sh usecase run NAME VERB [ARGS]   # Operate: use-cases/NAME/ops.py VERB
+#   ./deploy.sh layer run NAME VERB [ARGS]     # Operate: layers/NAME/ops.py VERB
+#
+# Profiles: greenfield, migration, multi-agent, platform-team, security-focused, production
+# Teams: platform, agent, security
+# Modules: 3, 4, 5, 6, 7, 8, 9, A, B, C, D, E
+# ═══════════════════════════════════════════════════════════════
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# ── Colors ──
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
+log_step()  { echo -e "${BLUE}[STEP]${NC}  $*"; }
+log_header(){ echo -e "\n${BOLD}${CYAN}═══ $* ═══${NC}\n"; }
+log_explain(){ echo -e "${YELLOW}📖${NC} $*"; }
+
+# ═══════════════════════════════════════════════════════════════
+# Saved Workshop Config (workshop.env)
+# ═══════════════════════════════════════════════════════════════
+# Precedence: env var > platform.yaml > saved workshop.env > default.
+# Secrets (IDP_CLIENT_SECRET, API keys) are NEVER persisted —
+# the IdP secret lives in Secrets Manager (see upsert_idp_secret).
+# ponytail: flat sourceable KEY=value file; upgrade path is the
+# declarative Pydantic/YAML config task on the board.
+CONFIG_FILE="$PROJECT_DIR/workshop.env"
+CONFIG_KEYS=(AWS_REGION DEPLOYMENT_MODE IDP_TYPE IDP_MODE IDP_TENANT_ID IDP_CLIENT_ID IDP_ISSUER_URL
+             MODEL_ID ORG_ID PROJECT_NAME ENVIRONMENT AGENT_PATTERN
+             ORCHESTRATOR_RUNTIME_GENERATION MEMORY_EVENT_EXPIRY_DAYS
+             LOG_RETENTION_DAYS)
+
+save_config() {
+    # CI runs (NON_INTERACTIVE=1) never write the file.
+    [ "${NON_INTERACTIVE:-0}" = "1" ] && return 0
+    local key
+    {
+        echo "# AgentCore workshop saved answers — safe to edit or delete. Secrets are never stored here."
+        for key in "${CONFIG_KEYS[@]}"; do
+            [ -z "${!key:-}" ] && continue
+            printf '%s=%q\n' "$key" "${!key}"
+        done
+    } > "$CONFIG_FILE"
+    log_info "Saved answers to $CONFIG_FILE"
+}
+
+# How many stacks named $1 exist and are not deleted. list-stacks paginates and the CLI
+# applies --query to each page, so it prints one count per page ("0\n0"); this sums them.
+live_stack_count() {
+    local counts
+    counts=$(aws cloudformation list-stacks --region "$AWS_REGION" \
+        --query "length(StackSummaries[?StackName=='$1' && StackStatus!='DELETE_COMPLETE'])" \
+        --output text) || return 1
+    awk '{ for (i = 1; i <= NF; i++) s += $i } END { print s + 0 }' <<<"$counts"
+}
+
+load_config() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    local key n
+    declare -A pre_load
+    for key in "${CONFIG_KEYS[@]}"; do pre_load[$key]="${!key:-}"; done
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+    # Env vars and explicit exports always win over the saved file.
+    for key in "${CONFIG_KEYS[@]}"; do
+        [ -n "${pre_load[$key]}" ] && printf -v "$key" '%s' "${pre_load[$key]}"
+    done
+    n=$(grep -c '=' "$CONFIG_FILE" || true)
+    log_info "Loaded saved config from workshop.env ($n values; env vars override)"
+}
+# ── platform.yaml (declarative config) ──
+# Precedence: explicit env vars > platform.yaml > workshop.env (wizard answers)
+# > interactive prompts. A user-authored file beats remembered answers, so it
+# is applied BEFORE load_config (which only fills still-unset keys). Fail-soft
+# here: this runs before setup_venv, so pydantic may not exist yet — app.py
+# hard-validates the same file at synth time either way.
+PLATFORM_CONFIG="${PLATFORM_CONFIG:-$PROJECT_DIR/platform.yaml}"
+
+# ── Profile → preset materialization ──
+# A profile IS a preset: --profile X writes presets/X.yaml to platform.yaml
+# (the durable manifest) instead of exporting one-shot env flags. That is what
+# makes intent survive the run — the next plain `deploy` reads the same file,
+# so a redeploy can no longer silently change the footprint (A2A used to
+# default back on, and destroy could not see stacks an old profile created).
+MATERIALIZE_HEADER="# Generated from presets/"
+valid_profiles() {
+    (cd "$PROJECT_DIR/presets" && ls -- *.yaml | sed 's/\.yaml$//' | tr '\n' ' ')
+}
+materialize_preset() {
+    local profile="$1" src dst="$PLATFORM_CONFIG"
+    src="$PROJECT_DIR/presets/$profile.yaml"
+    if [ ! -f "$src" ]; then
+        log_error "Unknown profile: '$profile'. Valid profiles: $(valid_profiles)"
+        exit 1
+    fi
+    if [ -f "$dst" ] && ! head -1 "$dst" | grep -q "^$MATERIALIZE_HEADER"; then
+        if [ "${PRESCAN_YES:-0}" != "1" ]; then
+            log_error "platform.yaml exists and was not generated from a preset."
+            log_error "Refusing to overwrite a hand-edited manifest with --profile $profile."
+            log_error "Drop --profile (the file already IS the config), or re-run with --yes."
+            exit 1
+        fi
+        log_warn "Overwriting hand-edited platform.yaml with preset '$profile' (--yes)."
+    fi
+    {
+        echo "${MATERIALIZE_HEADER}${profile}.yaml by deploy.sh. Safe to edit — this header"
+        echo "# only marks that --profile may regenerate the file. Remove it to protect edits."
+        cat "$src"
+    } > "$dst"
+    log_info "Profile '$profile' materialized as platform.yaml (the deployment manifest)"
+}
+
+# Layered design: compose presets journey x topology x posture into
+# platform.yaml (infra_utils.platform_config.compose_layers). Validation is
+# the normal design path that runs right after.
+materialize_layers() {
+    local dst="$PLATFORM_CONFIG" py="$PROJECT_DIR/.venv/bin/python" out
+    [ -x "$py" ] || py="python3"
+    if [ -f "$dst" ] && ! head -1 "$dst" | grep -q "^$MATERIALIZE_HEADER"; then
+        if [ "${PRESCAN_YES:-0}" != "1" ]; then
+            log_error "platform.yaml exists and was not generated from a preset."
+            log_error "Refusing to overwrite a hand-edited manifest with layered presets."
+            log_error "Drop the layer flags (the file already IS the config), or re-run with --yes."
+            exit 1
+        fi
+        log_warn "Overwriting hand-edited platform.yaml with layered presets (--yes)."
+    fi
+    if ! out=$(cd "$PROJECT_DIR" && "$py" -c 'import sys; from infra_utils.platform_config import compose_cli; sys.exit(compose_cli(sys.argv[1:]))' "$dst" "$1" "$2" "$3" "${4:-}" 2>&1); then
+        log_error "Cannot compose platform.yaml from layers:"
+        echo "$out" | sed 's/^/    /' >&2
+        exit 1
+    fi
+    log_info "$out"
+}
+
+# Pre-scan argv: materialization must precede apply_platform_config below so
+# the manifest it writes participates with the right precedence. Skipped for
+# the config/doctor actions and for --dry-run (read-only commands must not
+# mutate config).
+PRESCAN_PROFILE=""; PRESCAN_YES=0; PRESCAN_DRY=0
+_prev=""
+for _a in "$@"; do
+    [ "$_prev" = "--profile" ] && PRESCAN_PROFILE="$_a"
+    case "$_a" in
+        --yes)     PRESCAN_YES=1 ;;
+        --dry-run) PRESCAN_DRY=1 ;;
+    esac
+    _prev="$_a"
+done
+
+# --journey/--topology/--posture [--region]: consumed here and stripped from
+# argv so the design parser below sees only the flags it already knows.
+PRESCAN_JOURNEY=""; PRESCAN_TOPOLOGY=""; PRESCAN_POSTURE=""; PRESCAN_REGION=""
+_rest=(); _prev=""
+for _a in "$@"; do
+    case "$_prev" in
+        --journey)  PRESCAN_JOURNEY="$_a";  _prev=""; continue ;;
+        --topology) PRESCAN_TOPOLOGY="$_a"; _prev=""; continue ;;
+        --posture)  PRESCAN_POSTURE="$_a";  _prev=""; continue ;;
+        --region)   PRESCAN_REGION="$_a";   _prev=""; continue ;;
+    esac
+    case "$_a" in
+        --journey|--topology|--posture|--region) _prev="$_a"; continue ;;
+    esac
+    _rest+=("$_a"); _prev=""
+done
+if [ -n "$_prev" ]; then
+    log_error "$_prev needs a value."
+    exit 1
+fi
+if [ -n "${PRESCAN_JOURNEY}${PRESCAN_TOPOLOGY}${PRESCAN_POSTURE}" ]; then
+    if [ "${1:-}" != "design" ]; then
+        log_error "--journey/--topology/--posture are options of the design subcommand."
+        exit 1
+    fi
+    if [ -z "$PRESCAN_JOURNEY" ] || [ -z "$PRESCAN_TOPOLOGY" ] || [ -z "$PRESCAN_POSTURE" ]; then
+        log_error "--journey, --topology and --posture are required together."
+        exit 1
+    fi
+    if [ -n "$PRESCAN_PROFILE" ]; then
+        log_error "--profile cannot be combined with --journey/--topology/--posture."
+        exit 1
+    fi
+    if [ "$PRESCAN_DRY" != "1" ]; then
+        materialize_layers "$PRESCAN_JOURNEY" "$PRESCAN_TOPOLOGY" "$PRESCAN_POSTURE" "$PRESCAN_REGION"
+    fi
+    set -- "${_rest[@]}"
+fi
+
+if [ -n "$PRESCAN_PROFILE" ] \
+    && [ "${1:-}" != "config" ] \
+    && [ "${1:-}" != "doctor" ] \
+    && [ "$PRESCAN_DRY" != "1" ]; then
+    if [ "${1:-}" = "migrate" ] && [ "${2:-}" = "plan" ]; then
+        # Planning a shipped migration preset must be genuinely read-only:
+        # inspect it in place instead of replacing a customer's platform.yaml.
+        PLATFORM_CONFIG="$PROJECT_DIR/presets/$PRESCAN_PROFILE.yaml"
+        [ -f "$PLATFORM_CONFIG" ] || {
+            log_error "Unknown profile: '$PRESCAN_PROFILE'. Valid profiles: $(valid_profiles)"
+            exit 1
+        }
+        log_info "Profile '$PRESCAN_PROFILE' selected for read-only migration planning"
+    elif [ "${1:-}" = "migrate" ]; then
+        # Readiness evaluates the operator's completed manifest. It must not
+        # materialize a template over that file; the parser below rejects
+        # --profile for every migrate sub-action except plan.
+        :
+    else
+        materialize_preset "$PRESCAN_PROFILE"
+    fi
+fi
+
+# Placeholders are useful discovery warnings in a read-only migration plan,
+# but no build/deploy/design path may inherit the parity gate's escape hatch.
+if [ "${1:-}" = "migrate" ] && [ "${2:-}" = "plan" ]; then
+    export PLATFORM_ALLOW_PLACEHOLDERS=1
+else
+    unset PLATFORM_ALLOW_PLACEHOLDERS
+fi
+
+apply_platform_config() {
+    [ -f "$PLATFORM_CONFIG" ] || return 0
+    local py="$PROJECT_DIR/.venv/bin/python"
+    [ -x "$py" ] || py="python3"
+    local exports key value
+    # cd: infra_utils must be importable; this runs before the main-flow cd.
+    if ! exports=$(cd "$PROJECT_DIR" && "$py" -m infra_utils.platform_config --export --effective-env "$PLATFORM_CONFIG" 2>&1); then
+        # Two different failures, two different messages. Missing dependencies:
+        # continue without the file. Anything else is the manifest itself
+        # (placeholders, a typo'd key): a malformed file must not silently
+        # deploy defaults, so stop and show the validator's own words.
+        if echo "$exports" | grep -q "ModuleNotFoundError"; then
+            log_warn "platform.yaml present but not loadable yet (missing venv?) — continuing without it."
+            log_warn "Validate it with: python -m infra_utils.platform_config $PLATFORM_CONFIG"
+            return 0
+        fi
+        log_error "$PLATFORM_CONFIG is not deployable:"
+        echo "$exports" | sed 's/^/    /' >&2
+        log_error "Fix the fields above, then run: $0 design"
+        exit 1
+    fi
+    local applied=0
+    while IFS='=' read -r key value; do
+        [ -z "$key" ] && continue
+        if [ -z "${!key:-}" ]; then
+            printf -v "$key" '%s' "$value"
+            export "${key?}"
+            applied=$((applied + 1))
+        fi
+    done <<< "$exports"
+    log_info "Applied $applied value(s) from $PLATFORM_CONFIG (env vars override)"
+}
+# ── 'usecase' action: scaffold / add / remove / list / run use cases (scripts/usecase.py) ──
+# Before apply_platform_config on purpose: scaffolding and listing must work
+# on a manifest that is not deployable yet (placeholders, a half-written
+# use_cases: block) — that is exactly when a customer runs them.
+if [ "${1:-}" = "usecase" ]; then
+    shift
+    py="$PROJECT_DIR/.venv/bin/python"; [ -x "$py" ] || py="python3"
+    cd "$PROJECT_DIR" && exec "$py" scripts/usecase.py --manifest "$PLATFORM_CONFIG" "$@"
+fi
+# 'layer run NAME VERB': the same, for layers/NAME/ops.py.
+if [ "${1:-}" = "layer" ]; then
+    [ "${2:-}" = "run" ] || { echo "Usage: $0 layer run NAME VERB [ARGS]" >&2; exit 2; }
+    shift 2
+    py="$PROJECT_DIR/.venv/bin/python"; [ -x "$py" ] || py="python3"
+    cd "$PROJECT_DIR" && exec "$py" scripts/usecase.py --manifest "$PLATFORM_CONFIG" run --layer "$@"
+fi
+
+# ── 'doctor' action: read-only local + AWS preflight ──
+# This runs before apply_platform_config and the normal deployment flow so a
+# missing dependency or invalid manifest becomes a diagnostic, never a
+# fallback to defaults. preflight.py uses only bounded read APIs.
+if [ "${1:-}" = "doctor" ]; then
+    shift
+    py="$PROJECT_DIR/.venv/bin/python"
+    if [ ! -x "$py" ]; then
+        py="$(command -v python3.13 || command -v python3 || true)"
+    fi
+    if [ -z "$py" ]; then
+        log_error "Python is not installed. Install Python 3.13 and retry."
+        exit 1
+    fi
+    cd "$PROJECT_DIR" && exec "$py" scripts/preflight.py \
+        --manifest "$PLATFORM_CONFIG" "$@"
+fi
+
+apply_platform_config
+load_config
+
+# ── Configuration ──
+PROJECT_NAME="${PROJECT_NAME:-agentcore-workshop}"
+ENVIRONMENT="${ENVIRONMENT:-dev}"
+PREFIX="${PROJECT_NAME}-${ENVIRONMENT}"
+
+# ── Agent Pattern ──
+# Selects which Dockerfile under agent-code/ the runtime builds (app.py reads
+# it as the agent_pattern context value). Validated here because a typo would
+# otherwise surface minutes later as a CodeBuild failure on a missing path.
+AGENT_PATTERNS="orchestrator strands-agent langgraph-agent claude-sdk-agent claude-sdk-multi-agent agui-strands-agent agui-langgraph-agent none"
+AGENT_PATTERN="${AGENT_PATTERN:-orchestrator}"
+case " $AGENT_PATTERNS " in
+    *" $AGENT_PATTERN "*) ;;
+    *) log_error "Unknown agent pattern: '$AGENT_PATTERN'. Valid patterns: $AGENT_PATTERNS"
+       exit 1 ;;
+esac
+
+# ═══════════════════════════════════════════════════════════════
+# Workshop Module → CDK Stack Mapping (Requirement 19)
+# ═══════════════════════════════════════════════════════════════
+declare -A MODULE_MAP
+MODULE_MAP[3]="${PREFIX}-auth"                                                    # Infrastructure Blueprint
+MODULE_MAP[4]="${PREFIX}-auth ${PREFIX}-identity"                                 # Identity Integration
+MODULE_MAP[5]="${PREFIX}-gateway"                                                 # Gateway & Registry
+MODULE_MAP[6]="${PREFIX}-runtime-orchestrator"                                    # Agent Deployment
+MODULE_MAP[7]="${PREFIX}-gateway"                                                 # Gateway Integration (add targets)
+MODULE_MAP[8]="${PREFIX}-runtime-code-agent ${PREFIX}-runtime-research-agent"     # A2A
+MODULE_MAP[9]="${PREFIX}-observability"                                           # Observability
+MODULE_MAP[A]="${PREFIX}-memory"                                                  # Memory
+MODULE_MAP[B]="${PREFIX}-runtime-orchestrator"                                    # Code Interpreter
+MODULE_MAP[C]="${PREFIX}-networking"                                              # Multi-Account Mesh (deploys the networking foundation)
+# Module D (CI/CD Pipeline) is a guided module with no CDK stacks — see the
+# --module D handling below and .gitlab-ci.yml for the reference implementation.
+MODULE_MAP[E]="${PREFIX}-security"                                                # Security Automation
+VALID_MODULES="3 4 5 6 7 8 9 A B C D E"
+
+# ── Guided workshop narration (workshop action) ──
+# First line of each entry is the module title; the rest is the what/why
+# explanation shown before deploying. One physical line per entry (with \n
+# escapes) so check-workshop-flow.sh can extract them with sed.
+declare -A MODULE_EXPLAIN
+MODULE_EXPLAIN[3]=$'Infrastructure Blueprint\nWhat: Cognito User Pool with email sign-in, OAuth clients (app/web/m2m), and SSM parameters for cross-stack discovery.\nWhy: every AgentCore call is authenticated — this identity foundation is the trust root everything else builds on.'
+MODULE_EXPLAIN[4]=$'Identity Integration\nWhat: the AgentCore M2M credential provider agents use to reach the Gateway. Optional on top: your enterprise IdP federated into Cognito (set IDP_TYPE=entra_id|okta|ping) and 3LO providers for Google/GitHub/Notion (only when you supply their client ids). Walkthrough: docs/ENTERPRISE_IDP.md\nWhy: users keep their corporate logins, and agents get scoped credentials to act on their behalf with external services.'
+MODULE_EXPLAIN[5]=$'Gateway & Registry\nWhat: AgentCore MCP Gateway with Lambda tool targets and CUSTOM_JWT auth against the Cognito issuer.\nWhy: centralized, governed tool access — agents discover tools through the gateway instead of hardcoding endpoints, with an audit trail for every call.'
+MODULE_EXPLAIN[6]=$'Agent Deployment\nWhat: the orchestrator agent on AgentCore Runtime — CodeBuild builds the container remotely (no local Docker) and CfnRuntime runs it.\nWhy: managed, auto-scaling agent compute with auth wired in; no servers to patch, the agent code stays the same.'
+MODULE_EXPLAIN[7]=$'Gateway Integration\nWhat: adds/updates tool targets by redeploying the gateway stack — built-in connectors (no code) or your own Lambda tools. Walkthrough: docs/GATEWAY_TARGETS.md\nWhy: this is how a real platform grows — new tools land in the registry and agents pick them up on the next discovery, with no agent redeploy.'
+MODULE_EXPLAIN[8]=$'Agent-to-Agent (A2A)\nWhat: code + research sub-agents on their own Runtimes; the orchestrator delegates specialized tasks to them over A2A.\nWhy: specialized agents with independent auth, scaling, and lifecycle beat one monolith. (Requires enable_a2a=true — set automatically for this module.)'
+MODULE_EXPLAIN[9]=$'Observability\nWhat: vended log delivery + X-Ray tracing for the gateway, memory, and runtimes.\nWhy: you cannot operate what you cannot see — per-resource logs and end-to-end request traces.'
+MODULE_EXPLAIN[A]=$'Memory\nWhat: AgentCore managed Memory with a user-preference strategy (semantic fact extraction is added only when USE_LONG_TERM_MEMORY=true — it costs more).\nWhy: agents keep context across sessions without building custom vector infrastructure.'
+MODULE_EXPLAIN[C]=$'Multi-Account Networking\nWhat: VPC, private subnets, and AgentCore VPC endpoints (org-restricted policy when ORG_ID is set).\nWhy: enterprise network isolation — agent traffic stays on the AWS backbone.'
+MODULE_EXPLAIN[E]=$'Security Automation\nWhat: KMS customer-managed key encryption + CloudTrail audit logging (plus opt-in guardrail controls).\nWhy: enterprise security baselines — customer-managed keys and a full audit trail of AgentCore API calls.'
+
+# ── Guided workshop verification (workshop action) ──
+# Each entry is a shell snippet run via `bash -c` from the project root after
+# the module deploys (run_verify exports PROJECT_NAME/ENVIRONMENT/PREFIX/AWS_REGION).
+# 5/6/7/A reuse the live-proven test scripts; the rest are cheap SSM/CFN presence checks.
+declare -A MODULE_VERIFY
+# Single quotes are deliberate throughout this block: the snippets are expanded
+# later, inside `bash -c` at verify time (AWS_REGION isn't final until
+# check_credentials runs). The group scopes one directive over all entries.
+# shellcheck disable=SC2016
+{
+MODULE_VERIFY[3]='aws ssm get-parameter --name "/$PROJECT_NAME/$ENVIRONMENT/auth/issuer-url" --region "$AWS_REGION" --query Parameter.Value --output text'
+MODULE_VERIFY[4]='aws ssm get-parameter --name "/$PROJECT_NAME/$ENVIRONMENT/identity/gateway-credential-provider-name" --region "$AWS_REGION" --query Parameter.Value --output text'
+MODULE_VERIFY[5]='.venv/bin/python scripts/test_gateway.py'
+MODULE_VERIFY[6]='.venv/bin/python scripts/invoke.py "Reply with exactly: WORKSHOP OK"'
+MODULE_VERIFY[7]='.venv/bin/python scripts/test_gateway.py'
+MODULE_VERIFY[8]='.venv/bin/python scripts/invoke.py --a2a code-agent "Reply with exactly: A2A OK"'
+MODULE_VERIFY[9]='.venv/bin/python scripts/check_observability.py'
+MODULE_VERIFY[A]='.venv/bin/python scripts/test_memory.py'
+MODULE_VERIFY[C]='aws cloudformation describe-stacks --stack-name "$PREFIX-networking" --region "$AWS_REGION" --query "Stacks[0].StackStatus" --output text | grep -q COMPLETE && .venv/bin/python scripts/check_network.py'
+MODULE_VERIFY[E]='aws cloudformation describe-stacks --stack-name "$PREFIX-security" --region "$AWS_REGION" --query "Stacks[0].StackStatus" --output text | grep -q COMPLETE'
+}
+
+# ── Team Workstream Assignments (Requirement 20) ──
+declare -A TEAM_MAP
+TEAM_MAP[platform]="${PREFIX}-networking ${PREFIX}-auth ${PREFIX}-identity ${PREFIX}-gateway ${PREFIX}-observability"
+TEAM_MAP[agent]="${PREFIX}-runtime-orchestrator ${PREFIX}-runtime-code-agent ${PREFIX}-runtime-research-agent ${PREFIX}-memory"
+TEAM_MAP[security]="${PREFIX}-security ${PREFIX}-observability"
+
+# ── Module/Team → required feature flags ──
+# A module/team definition owns BOTH its stack names and the feature flags
+# those stacks need: MODULE_MAP[C] names ${PREFIX}-networking, but that stack
+# only exists in the synthesized app when ENABLE_NETWORKING=true — selecting
+# one without the other made cdk fail with "No stacks match" after bootstrap
+# had already run. Explicit env vars (and platform.yaml) still win: a flag is
+# only exported when it is currently unset (see apply_flags).
+declare -A MODULE_FLAGS
+MODULE_FLAGS[8]="ENABLE_A2A=true"
+MODULE_FLAGS[C]="ENABLE_NETWORKING=true"
+MODULE_FLAGS[E]="ENABLE_SECURITY=true"
+declare -A TEAM_FLAGS
+TEAM_FLAGS[agent]="ENABLE_A2A=true"
+TEAM_FLAGS[platform]="ENABLE_NETWORKING=true"
+TEAM_FLAGS[security]="ENABLE_SECURITY=true"
+
+# The apply_flags helper that consumes these tables lives after
+# build_context_args (it calls it, and shellcheck 0.9 flags forward calls).
+
+# Profile feature flags live in presets/*.yaml — --profile materializes the
+# preset as platform.yaml (see materialize_preset above). The old PROFILE_FLAGS
+# table here was the same intent written twice, and only the env-var copy
+# applied; it died with the run, so a later plain deploy changed the footprint.
+
+# ── Profile → Guided Workshop Module Sequence (workshop action) ──
+# Which modules each customer profile walks through, in order (README facilitator guide).
+declare -A PROFILE_MODULES
+PROFILE_MODULES[greenfield]="3 4 5 6 9"
+PROFILE_MODULES[migration]="3 4 6 7 9"
+PROFILE_MODULES[multi-agent]="3 4 5 6 7 8 9"
+# Memory (A) precedes Agent Deployment (6): the orchestrator runtime depends on
+# the memory stack, so CDK would create it implicitly at module 6 and module A
+# would then report "no changes" — deploying it in its own module keeps the
+# narrative honest.
+PROFILE_MODULES[platform-team]="3 4 5 A 6 7 8 9 C E"
+PROFILE_MODULES[security-focused]="3 4 5 6 9 E"
+
+# ═══════════════════════════════════════════════════════════════
+# Prerequisite Checks (Requirement 18)
+# ═══════════════════════════════════════════════════════════════
+check_prereqs() {
+    log_header "Prerequisite Checks"
+    local missing=0
+
+    # Note: docker is NOT required — container images are built remotely in AWS CodeBuild.
+    for cmd in node npm python3.13 aws; do
+        if command -v "$cmd" &>/dev/null; then
+            local ver
+            case "$cmd" in
+                node)       ver=$(node --version) ;;
+                npm)        ver=$(npm --version) ;;
+                python3.13) ver=$(python3.13 --version 2>&1) ;;
+                aws)        ver=$(aws --version 2>&1 | head -1) ;;
+            esac
+            log_info "✓ $cmd: $ver"
+        else
+            log_error "✗ $cmd: NOT FOUND"
+            missing=1
+        fi
+    done
+
+    # Optional: report docker if present, but don't fail without it.
+    if command -v docker &>/dev/null; then
+        log_info "✓ docker: $(docker --version 2>&1) (optional — used only for local container testing)"
+    else
+        log_info "○ docker: not installed (optional — image builds run in AWS CodeBuild)"
+    fi
+
+    # Check CDK CLI. --no-install is what keeps this from hanging: a bare
+    # `npx cdk` prints "Need to install the following packages ... Ok to
+    # proceed?" when aws-cdk is not in the npx cache, and with the output
+    # suppressed and no TTY (CI, a background deploy, the guided wizard) that
+    # wait never ends — the probe never returns, so the install below never ran.
+    # --no-install fails fast instead. npx still prefers a cdk already on PATH.
+    #
+    # The other `npx cdk` calls in this script stay safe because of this: past
+    # here the CLI is resolvable, or we exited.
+    local cdk_version
+    if cdk_version=$(npx --no-install cdk --version 2>/dev/null); then
+        log_info "✓ cdk: $cdk_version"
+    else
+        log_warn "CDK CLI not found, installing..."
+        if npm install -g aws-cdk; then
+            log_info "✓ cdk: installed"
+        else
+            log_error "✗ cdk: 'npm install -g aws-cdk' failed — install it manually and retry"
+            missing=1
+        fi
+    fi
+
+    if [ "$missing" -eq 1 ]; then
+        log_error "Install missing prerequisites and retry."
+        exit 1
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# AWS Credential Validation (Requirement 18.4)
+# ═══════════════════════════════════════════════════════════════
+validate_deployment_account() {
+    local strategy="${DEPLOYMENT_STRATEGY:-centralized}"
+    local expected="${PLATFORM_ACCOUNT:-}"
+
+    # Federated deployments intentionally run in more than one declared
+    # account; PlatformConfig.federated_role() validates membership before
+    # synthesis. For a one-account deployment, platform_account is the
+    # non-bypassable target-account boundary.
+    if [ "$strategy" != "federated" ]; then
+        if [ "${IDP_TYPE:-cognito}" != "cognito" ] \
+            && [ -n "${IDP_CLIENT_SECRET_NAME:-}" ] \
+            && [ -z "$expected" ]; then
+            log_error "The configured IdP secret is account-scoped, but no deployment account is pinned."
+            log_error "Set deployment.platform_account in platform.yaml to the intended 12-digit AWS account."
+            exit 1
+        fi
+        if [ -n "$expected" ] && [ "$ACCOUNT_ID" != "$expected" ]; then
+            log_error "Wrong AWS account: credentials resolve to $ACCOUNT_ID, but platform.yaml pins $expected."
+            log_error "No secret, bootstrap, or CloudFormation operation has been attempted."
+            log_error "Switch credentials to the intended account and retry."
+            exit 1
+        fi
+    fi
+}
+
+check_credentials() {
+    log_header "AWS Credentials"
+    if ! aws sts get-caller-identity &>/dev/null; then
+        log_error "AWS credentials invalid or expired."
+        log_error "Run 'aws sso login' or configure credentials, then retry."
+        exit 1
+    fi
+    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    AWS_REGION=${AWS_REGION:-$(aws configure get region 2>/dev/null || echo "us-east-1")}
+    local identity
+    identity=$(aws sts get-caller-identity --query Arn --output text)
+    log_info "Account:  $ACCOUNT_ID"
+    log_info "Region:   $AWS_REGION"
+    log_info "Identity: $identity"
+    export CDK_DEFAULT_ACCOUNT="$ACCOUNT_ID"
+    export CDK_DEFAULT_REGION="$AWS_REGION"
+    validate_deployment_account
+}
+
+# ═══════════════════════════════════════════════════════════════
+# ORG_ID Validation (fail fast before any CDK command)
+# ═══════════════════════════════════════════════════════════════
+check_org_id() {
+    # enable_resource_policies=true makes the memory stack raise a ValueError
+    # mid-deploy when org_id is empty — catch that here instead.
+    if [ "${ENABLE_RESOURCE_POLICIES:-}" = "true" ] && [ -z "${ORG_ID:-}" ]; then
+        if [ "${NON_INTERACTIVE:-0}" != "1" ]; then
+            echo ""
+            log_warn "Resource policies are enabled and require your AWS Organizations ID."
+            read -rp "  AWS Organizations ID (o-xxxx): " ORG_ID
+        fi
+        if [ -z "${ORG_ID:-}" ]; then
+            log_error "enable_resource_policies=true requires an AWS Organizations ID."
+            log_error "The memory stack resource policy uses aws:PrincipalOrgID and cannot render without it."
+            log_error "Fix: export ORG_ID=o-xxxx and re-run."
+            log_error "(Find it with: aws organizations describe-organization --query Organization.Id --output text)"
+            exit 1
+        fi
+        export ORG_ID
+        save_config
+    fi
+
+    # The networking stack silently skips the AgentCore VPC endpoint policy
+    # without org_id — warn so the user knows the endpoint is unrestricted.
+    if [ "${ENABLE_NETWORKING:-}" = "true" ] && [ -z "${ORG_ID:-}" ]; then
+        log_warn "enable_networking=true without ORG_ID: the AgentCore VPC endpoint"
+        log_warn "policy will be skipped (endpoint deploys without an org-restricted policy)."
+        log_warn "To apply it: export ORG_ID=o-xxxx and re-deploy."
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Interactive Configuration (Requirement 3)
+# ═══════════════════════════════════════════════════════════════
+prompt_region() {
+    if [ "${NON_INTERACTIVE:-0}" = "1" ]; then return; fi
+    echo ""
+    echo "Available regions:"
+    echo "  1) us-east-1 (N. Virginia)"
+    echo "  2) us-west-2 (Oregon)"
+    echo "  3) eu-west-1 (Ireland)"
+    echo "  4) eu-central-1 (Frankfurt)"
+    echo "  5) ap-northeast-1 (Tokyo)"
+    echo "  6) ap-southeast-1 (Singapore)"
+    read -rp "Select region [${AWS_REGION:+saved: }${AWS_REGION:-1}]: " choice
+    case "${choice:-keep}" in
+        1) AWS_REGION="us-east-1" ;; 2) AWS_REGION="us-west-2" ;;
+        3) AWS_REGION="eu-west-1" ;; 4) AWS_REGION="eu-central-1" ;;
+        5) AWS_REGION="ap-northeast-1" ;; 6) AWS_REGION="ap-southeast-1" ;;
+        keep) AWS_REGION="${AWS_REGION:-us-east-1}" ;;
+        *) AWS_REGION="us-east-1" ;;
+    esac
+    export CDK_DEFAULT_REGION="$AWS_REGION"
+    log_info "Region set to: $AWS_REGION"
+}
+
+prompt_agent_pattern() {
+    if [ "${NON_INTERACTIVE:-0}" = "1" ]; then return; fi
+    # shellcheck disable=SC2206  # deliberate word split: AGENT_PATTERNS is a fixed literal list
+    local choice i=1 pats=($AGENT_PATTERNS)
+    echo ""
+    echo "Agent framework pattern (the container the runtime builds):"
+    for p in "${pats[@]}"; do echo "  $i) $p"; i=$((i + 1)); done
+    read -rp "Select pattern [keep: ${AGENT_PATTERN}]: " choice
+    # Accept the menu number or the pattern name; anything else keeps the current value.
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#pats[@]}" ]; then
+        AGENT_PATTERN="${pats[$((choice - 1))]}"
+    elif [ -n "$choice" ] && [[ " $AGENT_PATTERNS " == *" $choice "* ]]; then
+        AGENT_PATTERN="$choice"
+    elif [ -n "$choice" ]; then
+        log_warn "Unknown pattern '$choice' — keeping ${AGENT_PATTERN}"
+    fi
+    log_info "Agent pattern set to: $AGENT_PATTERN"
+}
+
+prompt_idp() {
+    if [ "${NON_INTERACTIVE:-0}" = "1" ]; then return; fi
+    if [ -n "${IDP_TYPE:-}" ]; then
+        echo ""
+        read -rp "IdP: ${IDP_TYPE} (saved) — keep? [Y/n]: " keep
+        if [[ ! "$keep" =~ ^[Nn] ]]; then
+            # The client secret is never persisted: reuse the configured
+            # Secrets Manager reference, otherwise prompt for a new value.
+            if [ "$IDP_TYPE" != "cognito" ] && [ -z "${IDP_CLIENT_SECRET:-}" ]; then
+                if [ -n "${IDP_CLIENT_SECRET_NAME:-}" ]; then
+                    # validate_configured_idp_secret already proved this exact
+                    # reference readable in the pinned account. Never turn a
+                    # missing or denied configured secret into a plaintext
+                    # prompt: that masked wrong-account credentials.
+                    log_info "✓ IdP client secret: reusing configured Secrets Manager secret ($IDP_CLIENT_SECRET_NAME)"
+                else
+                    read -rsp "  ${IDP_TYPE} Client Secret: " IDP_CLIENT_SECRET; echo ""
+                    if [ -z "${IDP_CLIENT_SECRET:-}" ]; then
+                        log_error "An empty IdP client secret is not valid."
+                        log_error "Enter the secret value, or configure identity.client_secret_name in platform.yaml."
+                        exit 1
+                    fi
+                fi
+            fi
+            log_info "IdP set to: ${IDP_TYPE}"
+            return
+        fi
+        unset IDP_TYPE IDP_TENANT_ID IDP_CLIENT_ID IDP_ISSUER_URL
+    fi
+    echo ""
+    echo "Identity Provider:"
+    echo "  1) Amazon Cognito (default)"
+    echo "  2) Microsoft Entra ID"
+    echo "  3) Okta"
+    echo "  4) Ping Identity"
+    read -rp "Select IdP [1]: " choice
+    case "${choice:-1}" in
+        1) IDP_TYPE="cognito" ;;
+        2) IDP_TYPE="entra_id"
+           read -rp "  Entra ID Tenant ID: " IDP_TENANT_ID
+           read -rp "  Entra ID Client ID: " IDP_CLIENT_ID
+           read -rsp "  Entra ID Client Secret: " IDP_CLIENT_SECRET; echo ""
+           ;;
+        3) IDP_TYPE="okta"
+           read -rp "  Okta Issuer URL: " IDP_ISSUER_URL
+           read -rp "  Okta Client ID: " IDP_CLIENT_ID
+           read -rsp "  Okta Client Secret: " IDP_CLIENT_SECRET; echo ""
+           ;;
+        4) IDP_TYPE="ping"
+           read -rp "  Ping Issuer URL: " IDP_ISSUER_URL
+           read -rp "  Ping Client ID: " IDP_CLIENT_ID
+           read -rsp "  Ping Client Secret: " IDP_CLIENT_SECRET; echo ""
+           ;;
+    esac
+    log_info "IdP set to: ${IDP_TYPE:-cognito}"
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+# IdP Client Secret → Secrets Manager
+# ═══════════════════════════════════════════════════════════════
+# The enterprise IdP client secret must never travel as a plaintext CDK
+# context arg (visible in `ps` output and rendered into the synthesized
+# template). Instead we upsert it into Secrets Manager and pass only the
+# secret NAME; the auth stack resolves the value at deploy time via a
+# {{resolve:secretsmanager:...}} CloudFormation dynamic reference.
+#
+# upsert_oauth_secret VALUE_VAR NAME_VAR DEFAULT_NAME LABEL
+#   VALUE_VAR    name of the variable holding the plaintext (unset afterwards)
+#   NAME_VAR     name of the variable holding/receiving the secret's name
+#   DEFAULT_NAME secret name used when the operator did not configure one
+#   LABEL        human label for log messages
+upsert_oauth_secret() {
+    local value_var="$1" name_var="$2" default_name="$3" label="$4"
+    local value="${!value_var:-}"
+    if [ -z "$value" ]; then return 0; fi
+    # Strip surrounding whitespace. A secret pasted from a console, or piped in
+    # from a CLI (`az ... -o tsv`), arrives with a trailing newline; it is
+    # stored and forwarded verbatim, and the provider's token endpoint rejects
+    # the exchange with invalid_client, naming nothing about whitespace. Cost
+    # an hour to find live — see docs/ENTERPRISE_IDP.md.
+    value="$(printf '%s' "$value" | tr -d '\n\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -z "$value" ]; then
+        log_error "$value_var is only whitespace — nothing to store."
+        exit 1
+    fi
+    # Write to the operator's secret when they named one (platform.yaml / env),
+    # otherwise to our own. Rotating into a bring-your-own secret must not
+    # silently fork a second copy under the prefixed name.
+    local secret_name="${!name_var:-$default_name}"
+    # Exported, not just assigned: app.py must see the name even on CDK calls
+    # that carry no context args (the bootstrap probe synthesizes the app too).
+    printf -v "$name_var" '%s' "$secret_name"
+    export "${name_var?}"
+    if aws secretsmanager describe-secret --secret-id "$secret_name" \
+        --region "$AWS_REGION" &>/dev/null; then
+        # Secret already exists — update the value (client secrets rotate).
+        if ! aws secretsmanager put-secret-value --secret-id "$secret_name" \
+            --secret-string "$value" --region "$AWS_REGION" &>/dev/null; then
+            log_error "Failed to update Secrets Manager secret '$secret_name'."
+            log_error "Check IAM permissions for secretsmanager:PutSecretValue and retry."
+            exit 1
+        fi
+        log_info "✓ $label secret: updated in Secrets Manager ($secret_name)"
+    else
+        if ! aws secretsmanager create-secret --name "$secret_name" \
+            --secret-string "$value" --region "$AWS_REGION" &>/dev/null; then
+            log_error "Failed to create Secrets Manager secret '$secret_name'."
+            log_error "Check IAM permissions for secretsmanager:CreateSecret and retry."
+            exit 1
+        fi
+        log_info "✓ $label secret: stored in Secrets Manager ($secret_name)"
+    fi
+    # Plaintext is no longer needed — only the secret name is passed to CDK.
+    unset "$value_var"
+}
+
+upsert_idp_secret() {
+    upsert_oauth_secret IDP_CLIENT_SECRET IDP_CLIENT_SECRET_NAME \
+        "${PREFIX}-idp-client-secret" "IdP client"
+}
+
+validate_configured_idp_secret() {
+    [ "${IDP_TYPE:-cognito}" != "cognito" ] || return 0
+    [ -n "${IDP_CLIENT_SECRET_NAME:-}" ] || return 0
+    # A supplied value is an explicit rotation; upsert_idp_secret validates and
+    # writes it below. Do not require the old version to remain readable.
+    [ -z "${IDP_CLIENT_SECRET:-}" ] || return 0
+    # Federated workload accounts consume their own M2M secret and do not
+    # deploy the platform-side enterprise IdP.
+    if [ "${DEPLOYMENT_STRATEGY:-centralized}" = "federated" ] \
+        && [ "${ACCOUNT_ID:-}" != "${PLATFORM_ACCOUNT:-}" ]; then
+        return 0
+    fi
+
+    local secret_length
+    if ! secret_length=$(aws secretsmanager get-secret-value \
+        --secret-id "$IDP_CLIENT_SECRET_NAME" \
+        --region "$AWS_REGION" \
+        --query 'length(SecretString)' \
+        --output text 2>/dev/null); then
+        log_error "Cannot read configured IdP secret '$IDP_CLIENT_SECRET_NAME'."
+        log_error "Account: ${ACCOUNT_ID:-unknown}   Region: $AWS_REGION"
+        log_error "Confirm the account, Region, secret name, AWSCURRENT version, and secretsmanager:GetSecretValue permission."
+        exit 1
+    fi
+    if ! [[ "$secret_length" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "Configured IdP secret '$IDP_CLIENT_SECRET_NAME' has no non-empty SecretString."
+        log_error "Account: ${ACCOUNT_ID:-unknown}   Region: $AWS_REGION"
+        exit 1
+    fi
+    log_info "✓ IdP client secret: readable in the pinned account ($IDP_CLIENT_SECRET_NAME)"
+}
+
+# 3LO providers (module 4): GOOGLE/GITHUB/NOTION_CLIENT_SECRET in the
+# environment is moved to Secrets Manager the same way — app.py refuses the
+# plaintext form outright.
+upsert_3lo_secrets() {
+    upsert_oauth_secret GOOGLE_CLIENT_SECRET GOOGLE_CLIENT_SECRET_NAME \
+        "${PREFIX}-google-oauth-secret" "Google OAuth"
+    upsert_oauth_secret GITHUB_CLIENT_SECRET GITHUB_CLIENT_SECRET_NAME \
+        "${PREFIX}-github-oauth-secret" "GitHub OAuth"
+    upsert_oauth_secret NOTION_CLIENT_SECRET NOTION_CLIENT_SECRET_NAME \
+        "${PREFIX}-notion-oauth-secret" "Notion OAuth"
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Python Virtual Environment
+# ═══════════════════════════════════════════════════════════════
+setup_venv() {
+    if [ ! -d "$PROJECT_DIR/.venv" ]; then
+        log_step "Creating Python virtual environment..."
+        python3.13 -m venv "$PROJECT_DIR/.venv"
+    fi
+    # shellcheck source=/dev/null  # generated by venv above; absent at lint time
+    source "$PROJECT_DIR/.venv/bin/activate"
+    pip install -q -r "$PROJECT_DIR/requirements.txt" 2>/dev/null
+}
+
+# ═══════════════════════════════════════════════════════════════
+# CDK Context Builder
+# ═══════════════════════════════════════════════════════════════
+# Populates the global CONTEXT_ARGS array. Using an array (expanded as
+# "${CONTEXT_ARGS[@]}") keeps values containing spaces intact — a single
+# string expanded unquoted would word-split them.
+CONTEXT_ARGS=()
+# During a credential-rotation drain, normal deploys must continue accepting
+# already-issued legacy JWTs without recreating the deleted client. The
+# rotation function populates this with a non-secret retired client ID.
+M2M_ROTATION_CONTEXT_ARGS=()
+M2M_DEPLOYMENT_LOCK_VALUE=""
+M2M_DEPLOYMENT_LOCK_PARAMETER=""
+ORCHESTRATOR_OBSERVABILITY_HANDOFF=0
+build_context_args() {
+    CONTEXT_ARGS=()
+    CONTEXT_ARGS+=(-c "project=${PROJECT_NAME}")
+    CONTEXT_ARGS+=(-c "environment=${ENVIRONMENT}")
+    CONTEXT_ARGS+=(-c "region=${AWS_REGION:-us-east-1}")
+    CONTEXT_ARGS+=(-c "deployment_mode=${DEPLOYMENT_MODE:-workshop}")
+    CONTEXT_ARGS+=(-c "idp_type=${IDP_TYPE:-cognito}")
+    CONTEXT_ARGS+=(-c "idp_mode=${IDP_MODE:-brokered}")
+    CONTEXT_ARGS+=(-c "orchestrator_runtime_generation=${ORCHESTRATOR_RUNTIME_GENERATION:-1}")
+    CONTEXT_ARGS+=(-c "memory_event_expiry_days=${MEMORY_EVENT_EXPIRY_DAYS:-30}")
+    CONTEXT_ARGS+=(-c "log_retention_days=${LOG_RETENTION_DAYS:-30}")
+
+    # IdP config — the client secret itself is never passed; only the name of
+    # the Secrets Manager secret set by upsert_idp_secret (see above).
+    [ -n "${IDP_TENANT_ID:-}" ]          && CONTEXT_ARGS+=(-c "idp_tenant_id=${IDP_TENANT_ID}")
+    [ -n "${IDP_CLIENT_ID:-}" ]          && CONTEXT_ARGS+=(-c "idp_client_id=${IDP_CLIENT_ID}")
+    [ -n "${IDP_CLIENT_SECRET_NAME:-}" ] && CONTEXT_ARGS+=(-c "idp_client_secret_name=${IDP_CLIENT_SECRET_NAME}")
+    [ -n "${IDP_ISSUER_URL:-}" ]         && CONTEXT_ARGS+=(-c "idp_issuer_url=${IDP_ISSUER_URL}")
+    [ -n "${FEDERATED_RETIRED_M2M_CLIENT_ID:-}" ] \
+        && CONTEXT_ARGS+=(-c "retired_m2m_client_id=${FEDERATED_RETIRED_M2M_CLIENT_ID}")
+
+    # 3LO provider config — same rule: secret NAMES only (upsert_3lo_secrets).
+    [ -n "${GOOGLE_CLIENT_ID:-}" ]          && CONTEXT_ARGS+=(-c "google_client_id=${GOOGLE_CLIENT_ID}")
+    [ -n "${GOOGLE_CLIENT_SECRET_NAME:-}" ] && CONTEXT_ARGS+=(-c "google_client_secret_name=${GOOGLE_CLIENT_SECRET_NAME}")
+    [ -n "${GITHUB_CLIENT_ID:-}" ]          && CONTEXT_ARGS+=(-c "github_client_id=${GITHUB_CLIENT_ID}")
+    [ -n "${GITHUB_CLIENT_SECRET_NAME:-}" ] && CONTEXT_ARGS+=(-c "github_client_secret_name=${GITHUB_CLIENT_SECRET_NAME}")
+    [ -n "${NOTION_CLIENT_ID:-}" ]          && CONTEXT_ARGS+=(-c "notion_client_id=${NOTION_CLIENT_ID}")
+    [ -n "${NOTION_CLIENT_SECRET_NAME:-}" ] && CONTEXT_ARGS+=(-c "notion_client_secret_name=${NOTION_CLIENT_SECRET_NAME}")
+
+    # Feature flags from profile
+    [ -n "${ENABLE_NETWORKING:-}" ] && CONTEXT_ARGS+=(-c "enable_networking=${ENABLE_NETWORKING}")
+    [ -n "${ENABLE_SECURITY:-}" ]   && CONTEXT_ARGS+=(-c "enable_security=${ENABLE_SECURITY}")
+    [ -n "${ENABLE_A2A:-}" ]        && CONTEXT_ARGS+=(-c "enable_a2a=${ENABLE_A2A}")
+
+    # Security control feature flags (control-library / scope-split model)
+    [ -n "${ENABLE_RESOURCE_POLICIES:-}" ] && CONTEXT_ARGS+=(-c "enable_resource_policies=${ENABLE_RESOURCE_POLICIES}")
+    [ -n "${ENABLE_EGRESS_FILTER:-}" ]     && CONTEXT_ARGS+=(-c "enable_egress_filter=${ENABLE_EGRESS_FILTER}")
+    [ -n "${ENABLE_CEDAR:-}" ]             && CONTEXT_ARGS+=(-c "enable_cedar=${ENABLE_CEDAR}")
+    [ -n "${CEDAR_MODE:-}" ]               && CONTEXT_ARGS+=(-c "cedar_mode=${CEDAR_MODE}")
+    [ -n "${ENABLE_TRACEABILITY:-}" ]      && CONTEXT_ARGS+=(-c "enable_traceability=${ENABLE_TRACEABILITY}")
+    [ -n "${ORG_ID:-}" ]                   && CONTEXT_ARGS+=(-c "org_id=${ORG_ID}")
+
+    # Optional Bedrock model ID override (agents fall back to their in-code default)
+    [ -n "${MODEL_ID:-}" ]                 && CONTEXT_ARGS+=(-c "model_id=${MODEL_ID}")
+
+    # Agent framework pattern (validated above; always set)
+    CONTEXT_ARGS+=(-c "agent_pattern=${AGENT_PATTERN}")
+
+    return 0
+}
+
+# apply_flags "KEY=value ..." LABEL — export each pair unless the user already
+# set that variable (explicit env wins over selection flags), then rebuild
+# CONTEXT_ARGS so the -c flags reflect the change. Tables: MODULE_FLAGS /
+# TEAM_FLAGS beside TEAM_MAP above.
+apply_flags() {
+    local pair key changed=0
+    for pair in $1; do
+        key="${pair%%=*}"
+        [ -n "${!key:-}" ] && continue
+        printf -v "$key" '%s' "${pair#*=}"
+        export "${key?}"
+        log_info "$pair enabled by the $2 selection (set it in platform.yaml to make it permanent)"
+        changed=1
+    done
+    [ "$changed" = "1" ] && build_context_args
+    return 0
+}
+apply_module_flags() { apply_flags "${MODULE_FLAGS[$1]:-}" "module $1"; }
+apply_selection_flags() {
+    [ -n "${MODULE:-}" ] && apply_module_flags "$MODULE"
+    [ -n "${TEAM:-}" ]   && apply_flags "${TEAM_FLAGS[$TEAM]:-}" "team $TEAM"
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Full-footprint confirmation (deploy --all / destroy --all)
+# ═══════════════════════════════════════════════════════════════
+# A deploy or destroy with no target touches EVERYTHING the app synthesizes,
+# so it shows the account, the config source, and the exact stack list first.
+# --yes skips the prompt; NON_INTERACTIVE=1 implies --yes (CI compatibility).
+confirm_footprint() {
+    # $1 = verb ("deploy" | "destroy")
+    [ "$YES" = "1" ] && return 0
+    [ "${NON_INTERACTIVE:-0}" = "1" ] && return 0
+    echo ""
+    log_header "Plan — $1 the FULL footprint"
+    log_info "Account: ${ACCOUNT_ID:-unknown}   Region: ${AWS_REGION:-us-east-1}   Prefix: ${PREFIX}"
+    local src="built-in defaults"
+    [ -f "$CONFIG_FILE" ] && src="workshop.env"
+    [ -f "$PLATFORM_CONFIG" ] && src="platform.yaml"
+    log_info "Config source: $src"
+    log_info "Stacks:"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk ls "${CONTEXT_ARGS[@]}" 2>/dev/null | sed 's/^/    /' \
+        || log_warn "(could not synthesize the stack list)"
+    local ans
+    read -rp "Proceed to $1 ALL of the above? [y/N]: " ans
+    case "$ans" in
+        [Yy]*) : ;;
+        *) log_error "Aborted before any change. Re-run with --yes to skip this prompt."; exit 1 ;;
+    esac
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Post-destroy sweep (full destroy only)
+# ═══════════════════════════════════════════════════════════════
+# `cdk destroy --all` can only see stacks the CURRENT config synthesizes. A
+# profile switch leaves live stacks invisible to it — the billable-NAT case:
+# deploy with networking on, destroy with it off, and the VPC stays. The
+# API-key/IdP secrets are created outside CloudFormation entirely, so no
+# destroy ever touched them. Discovery asks CloudFormation what actually
+# exists under the prefix instead of trusting the synth.
+#
+# Deletion policy: interactive → ask per category; --yes → delete;
+# NON_INTERACTIVE without --yes → report and leave (CI must not remove things
+# the config does not declare without being told explicitly).
+# A stack delete fails when a bucket it owns is not empty, which happens when S3 or
+# CloudFront deliver access logs after CloudFormation emptied the bucket. Outside
+# production, with the sweep's confirmation policy, empty each such bucket of this
+# deployment's own failed stacks so the destroy can be run again. Returns 0 only when it
+# emptied at least one. Never empties a versioned bucket (that would delete its history)
+# or anything under production, where buckets are retained by design.
+empty_unemptied_buckets() {
+    [ "${DEPLOYMENT_MODE:-workshop}" = "production" ] && return 1
+    local confirm="ask" ans stacks stack buckets b emptied=1
+    [ "${YES:-0}" = "1" ] && confirm="yes"
+    [ "$confirm" = "ask" ] && [ "${NON_INTERACTIVE:-0}" = "1" ] && confirm="no"
+    stacks=$(aws cloudformation list-stacks --stack-status-filter DELETE_FAILED \
+        --query "StackSummaries[?starts_with(StackName,'${PREFIX}-')].StackName" \
+        --output text --region "$AWS_REGION" 2>/dev/null | tr '\t' '\n' | grep -v '^None$' | grep . || true)
+    for stack in $stacks; do
+        buckets=$(aws cloudformation describe-stack-resources --stack-name "$stack" \
+            --region "$AWS_REGION" --output text \
+            --query "StackResources[?ResourceType=='AWS::S3::Bucket' && ResourceStatus=='DELETE_FAILED' && contains(ResourceStatusReason || '', 'not empty')].PhysicalResourceId" \
+            2>/dev/null | tr '\t' '\n' | grep -v '^None$' | grep . || true)
+        for b in $buckets; do
+            if [ "$(aws s3api get-bucket-versioning --bucket "$b" --query Status \
+                --output text 2>/dev/null)" = "Enabled" ]; then
+                log_warn "$stack could not delete $b, which is versioned: empty it yourself."
+                continue
+            fi
+            log_warn "$stack could not delete bucket $b: objects arrived after it was emptied."
+            ans="n"
+            case "$confirm" in
+                yes) ans="y" ;;
+                ask) read -rp "Empty $b and destroy again? [y/N]: " ans ;;
+                no)  log_warn "Leaving it (NON_INTERACTIVE without --yes): empty it, then destroy again." ;;
+            esac
+            [[ "$ans" =~ ^[Yy] ]] || continue
+            if aws s3 rm "s3://$b" --recursive --region "$AWS_REGION" >/dev/null; then
+                log_info "Emptied $b"
+                emptied=0
+            else
+                log_error "Could not empty $b"
+            fi
+        done
+    done
+    return "$emptied"
+}
+
+sweep_leftovers() {
+    local confirm="ask" ans s log_prefix log_group service_logs
+    [ "${YES:-0}" = "1" ] && confirm="yes"
+    [ "$confirm" = "ask" ] && [ "${NON_INTERACTIVE:-0}" = "1" ] && confirm="no"
+
+    local leftovers
+    leftovers=$(aws cloudformation list-stacks \
+        --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE UPDATE_ROLLBACK_COMPLETE \
+        --query "StackSummaries[?starts_with(StackName,'${PREFIX}-')].StackName" \
+        --output text --region "$AWS_REGION" 2>/dev/null | tr '\t' '\n' | grep . || true)
+    if [ -n "$leftovers" ]; then
+        log_warn "Still live after destroy (invisible to the current config):"
+        echo "$leftovers" | sed 's/^/    /'
+        ans="n"
+        case "$confirm" in
+            yes) ans="y" ;;
+            ask) read -rp "Delete these stacks too? [y/N]: " ans ;;
+            no)  log_warn "Leaving them (NON_INTERACTIVE without --yes). They may bill hourly." ;;
+        esac
+        if [[ "$ans" =~ ^[Yy] ]]; then
+            while IFS= read -r s; do
+                aws cloudformation delete-stack --stack-name "$s" --region "$AWS_REGION" \
+                    && log_info "Deletion started: $s" \
+                    || log_error "Could not start deletion of $s"
+            done <<< "$leftovers"
+            log_info "Deletions run in the background — check the CloudFormation console."
+        fi
+    fi
+
+    # Secrets this script creates outside CloudFormation, under OUR prefix
+    # only — a bring-your-own secret name is the operator's, never swept.
+    local orphaned=()
+    for s in idp-client-secret google-oauth-secret github-oauth-secret \
+             notion-oauth-secret; do
+        aws secretsmanager describe-secret --secret-id "${PREFIX}-${s}" \
+            --region "$AWS_REGION" &>/dev/null && orphaned+=("${PREFIX}-${s}")
+    done
+    if [ "${#orphaned[@]}" -gt 0 ]; then
+        log_warn "Secrets created outside CloudFormation:"
+        printf '    %s\n' "${orphaned[@]}"
+        ans="n"
+        case "$confirm" in
+            yes) ans="y" ;;
+            ask) read -rp "Delete these secrets (no recovery window)? [y/N]: " ans ;;
+            no)  log_warn "Leaving them (NON_INTERACTIVE without --yes)." ;;
+        esac
+        if [[ "$ans" =~ ^[Yy] ]]; then
+            for s in "${orphaned[@]}"; do
+                aws secretsmanager delete-secret --secret-id "$s" \
+                    --force-delete-without-recovery --region "$AWS_REGION" >/dev/null \
+                    && log_info "Deleted secret: $s" \
+                    || log_error "Could not delete secret $s"
+            done
+        fi
+    fi
+
+    # CodeBuild and Lambda create their own log groups on first use, and Lambda
+    # recreates a stack's own group (named after the stack) when a function's
+    # last lines arrive after the stack deleted it. Those groups are not
+    # CloudFormation resources, so deleting every stack still leaves them
+    # behind. Production logs are retained evidence by design;
+    # disposable workshop/migration environments use the same explicit
+    # confirmation policy as the other sweep categories.
+    if [ "${DEPLOYMENT_MODE:-workshop}" != "production" ]; then
+        service_logs=$(
+            for log_prefix in \
+                "/aws/codebuild/${PREFIX}-" \
+                "/aws/lambda/${PREFIX}-" \
+                "${PREFIX}-"; do
+                aws logs describe-log-groups \
+                    --log-group-name-prefix "$log_prefix" \
+                    --query "logGroups[].logGroupName" \
+                    --output text --region "$AWS_REGION" 2>/dev/null \
+                    | tr '\t' '\n' | grep -v '^None$' | grep . || true
+            done | sort -u
+        )
+        if [ -n "$service_logs" ]; then
+            log_warn "Service-created log groups left after destroy:"
+            echo "$service_logs" | sed 's/^/    /'
+            ans="n"
+            case "$confirm" in
+                yes) ans="y" ;;
+                ask) read -rp "Delete these log groups? [y/N]: " ans ;;
+                no)  log_warn "Leaving them (NON_INTERACTIVE without --yes)." ;;
+            esac
+            if [[ "$ans" =~ ^[Yy] ]]; then
+                while IFS= read -r log_group; do
+                    aws logs delete-log-group --log-group-name "$log_group" \
+                        --region "$AWS_REGION" \
+                        && log_info "Deleted log group: $log_group" \
+                        || log_error "Could not delete log group $log_group"
+                done <<< "$service_logs"
+            fi
+        fi
+    fi
+
+    # Rotation checkpoints are intentionally outside CloudFormation so they
+    # survive a multi-run token drain. A full destroy must remove them or a
+    # later fresh deployment could be mistaken for an in-progress upgrade.
+    aws ssm delete-parameters \
+        --names \
+        "/${PROJECT_NAME}/${ENVIRONMENT}/auth/m2m-retired-client-id" \
+        "/${PROJECT_NAME}/${ENVIRONMENT}/auth/m2m-retired-not-before" \
+        --region "$AWS_REGION" >/dev/null 2>&1 || {
+        log_error "Could not remove M2M rotation checkpoints after destroy."
+        return 1
+    }
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Stack Deploy Loop (shared by the deploy and workshop actions)
+# ═══════════════════════════════════════════════════════════════
+deployed_idp_mode() {
+    # "brokered" | "direct" for the auth stack in the account, "" when there is
+    # no auth stack yet (fresh deploy). Older brokered stacks predate the
+    # IdPMode output and report brokered.
+    local out
+    out=$(aws cloudformation describe-stacks --stack-name "${PREFIX}-auth" \
+            --query "Stacks[0].Outputs[?OutputKey=='IdPMode'].OutputValue" \
+            --output text 2>/dev/null) || { echo ""; return 0; }
+    case "$out" in direct) echo direct ;; *) echo brokered ;; esac
+}
+
+switch_issuer_consumers_first() {
+    # Switching a LIVE platform from brokered to direct: the gateway, identity
+    # and runtime stacks import Cognito values as CloudFormation exports, and
+    # CloudFormation refuses to update auth while any export is still imported
+    # ("Cannot delete export ... as it is in use by", hit live). Their new
+    # templates carry literal IdP values instead, so deploying them first
+    # drops the imports; the --all pass that follows then updates auth and
+    # no-ops the rest. A fresh deploy has no exports to drop, and the reverse
+    # switch needs auth first (its exports must exist) — the default order.
+    [ "${IDP_MODE:-brokered}" = "direct" ] || return 0
+    local deployed consumers
+    deployed=$(deployed_idp_mode)
+    [ -n "$deployed" ] && [ "$deployed" != "direct" ] || return 0
+    log_info "Switching issuer brokered → direct: deploying the auth consumers before auth"
+    consumers=$(JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk ls "${CONTEXT_ARGS[@]}" 2>/dev/null | grep -v -- "-auth$" | tr '\n' ' ')
+    # shellcheck disable=SC2086  # stack list is space-separated by design
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy $consumers --exclusively --require-approval never "${CONTEXT_ARGS[@]}" 2>&1 || {
+        log_error "Failed to deploy the auth consumers ahead of the issuer switch."
+        exit 1
+    }
+}
+
+redact_legacy_m2m_output() {
+    # The compatibility deployment must briefly retain the old CloudFormation
+    # output, and CDK prints stack outputs after a successful deploy. Never let
+    # that credential value reach a terminal transcript or CI log.
+    sed -E \
+        's/(UserPoolM2MClientDescribeCognitoUserPoolClient[^=]*ClientSecret[^=]*=)[[:space:]]*.*/\1 [REDACTED]/'
+}
+
+read_optional_rotation_parameter() {
+    # get-parameters returns success plus an empty Parameters list when a name
+    # does not exist. Any AWS/API failure remains non-zero and must stop the
+    # rotation; treating AccessDenied or a network error as "no checkpoint"
+    # could prune a still-valid client id during an active token drain.
+    local parameter_name="$1" value
+    value=$(aws ssm get-parameters \
+        --names "$parameter_name" \
+        --region "$AWS_REGION" \
+        --query "Parameters[0].Value" \
+        --output text) || {
+        log_error "Could not read M2M rotation checkpoint: $parameter_name"
+        return 1
+    }
+    if [ "$value" != "None" ]; then
+        printf '%s' "$value"
+    fi
+    return 0
+}
+
+release_m2m_deployment_lock() {
+    [ -n "$M2M_DEPLOYMENT_LOCK_VALUE" ] || return 0
+    # A deploy that lost its network usually loses it for this release too, and a lock
+    # left behind stops the next deploy. Retry a failed read or delete; never remove a
+    # lock someone else now owns.
+    local current delay deleted=0
+    for delay in ${M2M_LOCK_RELEASE_DELAYS:-2 4 8 16} ""; do
+        if current=$(read_optional_rotation_parameter "$M2M_DEPLOYMENT_LOCK_PARAMETER" 2>/dev/null); then
+            if [ "$current" = "$M2M_DEPLOYMENT_LOCK_VALUE" ]; then
+                aws ssm delete-parameter --name "$M2M_DEPLOYMENT_LOCK_PARAMETER" \
+                    --region "$AWS_REGION" >/dev/null 2>&1 && current="" deleted=1
+            elif [ -n "$current" ] || [ "$deleted" = 0 ]; then
+                log_error "Deployment lock ownership changed unexpectedly; refusing to remove it."
+                return 1
+            fi
+            # Gone after our delete, even one whose answer was lost: released.
+            if [ -z "$current" ] && [ "$deleted" = 1 ]; then
+                M2M_DEPLOYMENT_LOCK_VALUE=""
+                M2M_DEPLOYMENT_LOCK_PARAMETER=""
+                trap - EXIT
+                return 0
+            fi
+            deleted=1
+        fi
+        [ -n "$delay" ] || break
+        log_warn "Could not release the deployment lock yet; retrying in ${delay}s."
+        sleep "$delay"
+    done
+    log_error "Could not release the deployment lock $M2M_DEPLOYMENT_LOCK_PARAMETER."
+    log_error "See docs/TROUBLESHOOTING.md, \"Another deployment holds the lock\"."
+    return 1
+}
+
+release_m2m_deployment_lock_on_exit() {
+    local exit_code=$?
+    trap - EXIT
+    if ! release_m2m_deployment_lock; then
+        [ "$exit_code" -ne 0 ] || exit_code=1
+    fi
+    exit "$exit_code"
+}
+
+acquire_m2m_deployment_lock() {
+    # Every mutating CDK operation for one project/environment shares this
+    # atomic SSM lock. Without it, two rotations can both synthesize the fresh
+    # path and recreate/delete clients between phases. --no-overwrite elects
+    # exactly one winner. A lock left by SIGKILL fails closed: SSM has no
+    # compare-and-swap delete, so automatic "stale" takeover would be racy.
+    [ -z "$M2M_DEPLOYMENT_LOCK_VALUE" ] || return 0
+    local existing now
+    M2M_DEPLOYMENT_LOCK_PARAMETER="/${PROJECT_NAME}/${ENVIRONMENT}/auth/m2m-deployment-lock"
+    existing=$(read_optional_rotation_parameter "$M2M_DEPLOYMENT_LOCK_PARAMETER") || {
+        exit 1
+    }
+    if [ -n "$existing" ]; then
+        log_error "Another deployment holds the ${PROJECT_NAME}/${ENVIRONMENT} lock."
+        log_error "If no deployment is running, an owner must review and delete:"
+        log_error "  $M2M_DEPLOYMENT_LOCK_PARAMETER"
+        exit 1
+    fi
+    now=$(date +%s)
+    M2M_DEPLOYMENT_LOCK_VALUE="${ACCOUNT_ID:-unknown}:$$:${RANDOM:-0}:${now}"
+    if ! aws ssm put-parameter \
+        --name "$M2M_DEPLOYMENT_LOCK_PARAMETER" \
+        --type String \
+        --value "$M2M_DEPLOYMENT_LOCK_VALUE" \
+        --no-overwrite \
+        --region "$AWS_REGION" >/dev/null 2>&1; then
+        M2M_DEPLOYMENT_LOCK_VALUE=""
+        log_error "Could not acquire the deployment lock; another deployment may have started."
+        exit 1
+    fi
+    trap release_m2m_deployment_lock_on_exit EXIT
+}
+
+migrate_legacy_m2m_secret_export() {
+    # Releases before the G0 hardening passed Cognito's generated M2M client
+    # secret directly from auth to identity. CDK represented that as a
+    # CloudFormation export, so auth cannot simply remove it while the live
+    # identity stack still imports it.
+    #
+    # Upgrade in three safe, resumable steps:
+    #   1. Auth adds the Secrets Manager copy while retaining the old export.
+    #   2. Identity switches to the safe secret-name reference.
+    #   3. Auth removes the now-unused secret export.
+    # A failed step leaves the previous working credential path intact; rerun
+    # the same command after fixing the reported CloudFormation error.
+    # Direct mode has no Cognito M2M client. Its issuer-switch path updates
+    # consumers before auth and therefore needs no secret-export migration.
+    [ "${IDP_MODE:-brokered}" = "brokered" ] || return 0
+    local legacy_count replacement_export_count auth_stack_count
+    legacy_count=$(aws cloudformation describe-stacks \
+        --stack-name "${PREFIX}-auth" \
+        --region "$AWS_REGION" \
+        --query "length(Stacks[0].Outputs[?contains(OutputKey, 'UserPoolM2MClientDescribeCognitoUserPoolClient') && contains(OutputKey, 'ClientSecret')])" \
+        --output text 2>/dev/null) || {
+        auth_stack_count=$(live_stack_count "${PREFIX}-auth") || {
+            log_error "Could not determine whether the auth stack exists."
+            exit 1
+        }
+        [ "$auth_stack_count" = "0" ] && return 0
+        log_error "The auth stack exists but its M2M migration state could not be read."
+        exit 1
+    }
+    replacement_export_count=$(aws cloudformation describe-stacks \
+        --stack-name "${PREFIX}-auth" \
+        --region "$AWS_REGION" \
+        --query "length(Stacks[0].Outputs[?ExportName=='${PREFIX}:auth:m2m-client-id-v2' || ExportName=='${PREFIX}:auth:m2m-client-secret-name-v2'])" \
+        --output text 2>/dev/null) || {
+        log_error "The auth stack exists but its V2 M2M exports could not be read."
+        exit 1
+    }
+    # A partial retry may already have moved Identity off the unsafe export
+    # while Auth later rolled back to its pre-V2 shape. The migration is
+    # complete only when the secret-bearing export is gone AND both safe V2
+    # handoff exports exist. Otherwise rerun all three idempotent phases.
+    if [ "$legacy_count" = "0" ] && [ "$replacement_export_count" = "2" ]; then
+        return 0
+    fi
+
+    log_info "Migrating the legacy M2M secret export to Secrets Manager"
+    log_step "Migration 1/3: create the managed secret and retain the live export"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "${PREFIX}-auth" --exclusively --require-approval never \
+        "${CONTEXT_ARGS[@]}" -c retain_legacy_m2m_export=true 2>&1 \
+        | redact_legacy_m2m_output || {
+        log_error "Could not prepare the auth stack for M2M secret migration."
+        exit 1
+    }
+
+    log_step "Migration 2/3: switch the identity provider to the secret reference"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "${PREFIX}-identity" --exclusively --require-approval never \
+        "${CONTEXT_ARGS[@]}" -c retain_legacy_m2m_client=true 2>&1 || {
+        log_error "Could not move the identity stack to the M2M secret reference."
+        exit 1
+    }
+
+    log_step "Migration 3/3: remove the unused secret-bearing export"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "${PREFIX}-auth" --exclusively --require-approval never \
+        "${CONTEXT_ARGS[@]}" -c retain_legacy_m2m_client=true 2>&1 || {
+        log_error "Identity is using Secrets Manager, but auth could not remove the legacy export."
+        exit 1
+    }
+    log_info "Legacy M2M secret export removed"
+}
+
+rotate_legacy_m2m_client() {
+    # The credential that crossed the legacy output boundary must be
+    # invalidated, not merely moved. New minting stops immediately after the
+    # interface moves, but already-issued JWTs remain valid for 60 minutes.
+    # Keep their non-secret client id in authorizer allow-lists for a 65-minute
+    # drain, persisted in SSM so retries and later deploys resume safely.
+    local legacy_client_id retired_client_id not_before now remaining
+    local has_checkpoint=0
+    local authorizer_consumers
+    local drain_seconds=3900
+    local marker_root="/${PROJECT_NAME}/${ENVIRONMENT}/auth"
+    local retired_id_parameter="${marker_root}/m2m-retired-client-id"
+    local not_before_parameter="${marker_root}/m2m-retired-not-before"
+
+    if [ "${IDP_MODE:-brokered}" != "brokered" ]; then
+        # Switching away from Cognito invalidates its issuer as a whole. A
+        # stale checkpoint must not poison a later direct → brokered switch.
+        aws ssm delete-parameters \
+            --names "$retired_id_parameter" "$not_before_parameter" \
+            --region "$AWS_REGION" >/dev/null 2>&1 || {
+            log_error "Could not clear M2M rotation checkpoints for direct mode."
+            exit 1
+        }
+        M2M_ROTATION_CONTEXT_ARGS=()
+        return 0
+    fi
+
+    legacy_client_id=$(aws cloudformation describe-stacks \
+        --stack-name "${PREFIX}-auth" \
+        --region "$AWS_REGION" \
+        --query "Stacks[0].Outputs[?contains(OutputKey, 'ExportsOutputRefUserPoolM2MClient') && !contains(OutputKey, 'UserPoolM2MClientV2')].OutputValue | [0]" \
+        --output text 2>/dev/null) || {
+        local auth_stack_count
+        auth_stack_count=$(live_stack_count "${PREFIX}-auth") || {
+            log_error "Could not determine whether the auth stack exists."
+            exit 1
+        }
+        if [ "$auth_stack_count" != "0" ]; then
+            log_error "The auth stack exists but its rotation state could not be read."
+            exit 1
+        fi
+        legacy_client_id=""
+    }
+    [ "$legacy_client_id" != "None" ] || legacy_client_id=""
+    retired_client_id=$(read_optional_rotation_parameter "$retired_id_parameter") || {
+        exit 1
+    }
+    [ -z "$retired_client_id" ] || has_checkpoint=1
+
+    [ -n "$legacy_client_id" ] || [ -n "$retired_client_id" ] || return 0
+    [ -n "$retired_client_id" ] || retired_client_id="$legacy_client_id"
+
+    authorizer_consumers=$(JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk ls "${CONTEXT_ARGS[@]}" \
+        -c "retired_m2m_client_id=${retired_client_id}" 2>/dev/null \
+        | grep -E -- '-(gateway|runtime-(orchestrator|code-agent|research-agent))$' \
+        | tr '\n' ' ')
+    [ -n "$authorizer_consumers" ] || {
+        log_error "Could not resolve the M2M authorizer consumers."
+        exit 1
+    }
+
+    if [ "${DEPLOYMENT_STRATEGY:-centralized}" = "federated" ] \
+        && [ "$has_checkpoint" = "0" ] \
+        && [ "${FEDERATED_M2M_CONSUMERS_UPDATED:-0}" != "1" ]; then
+        log_step "Federated rotation preparation: allow both clients on platform authorizers"
+        # shellcheck disable=SC2086  # stack list is space-separated by design
+        JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+            npx cdk deploy $authorizer_consumers --exclusively \
+            --require-approval never "${CONTEXT_ARGS[@]}" \
+            -c "retired_m2m_client_id=${retired_client_id}" 2>&1 || {
+            log_error "Could not prepare platform authorizers for federated rotation."
+            exit 1
+        }
+        log_error "Federated M2M rotation now requires a coordinated workload update."
+        log_error "Read the safe M2MClientIdV2Export and M2MClientSecretNameV2Export"
+        log_error "auth-stack outputs. In every workload, preserve the previous client ID"
+        log_error "as FEDERATED_RETIRED_M2M_CLIENT_ID, deploy the replacement, then rerun"
+        log_error "this platform build with FEDERATED_M2M_CONSUMERS_UPDATED=1."
+        exit 1
+    fi
+
+    # A marker means phases 1-4 completed on an earlier run. If the old client
+    # still exists, deletion failed: first restore both allow-list entries,
+    # then retry deletion. If it is gone, continue or wait for token drain.
+    if [ "$has_checkpoint" = "1" ]; then
+        if [ -n "$legacy_client_id" ]; then
+            log_step "Rotation recovery: accept both clients before retrying deletion"
+            # shellcheck disable=SC2086  # stack list is space-separated by design
+            JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+                npx cdk deploy $authorizer_consumers --exclusively \
+                --require-approval never "${CONTEXT_ARGS[@]}" \
+                -c "retired_m2m_client_id=${retired_client_id}" 2>&1 || {
+                log_error "Could not restore the M2M token drain allow-list."
+                exit 1
+            }
+            JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+                npx cdk deploy "${PREFIX}-auth" --exclusively \
+                --require-approval never "${CONTEXT_ARGS[@]}" 2>&1 || {
+                log_error "Could not delete the invalidated M2M client."
+                exit 1
+            }
+            not_before=""
+        else
+            not_before=$(read_optional_rotation_parameter "$not_before_parameter") || {
+                exit 1
+            }
+        fi
+        if ! [[ "$not_before" =~ ^[0-9]+$ ]]; then
+            now=$(date +%s)
+            not_before=$((now + drain_seconds))
+            aws ssm put-parameter --name "$not_before_parameter" \
+                --type String --value "$not_before" --overwrite \
+                --region "$AWS_REGION" >/dev/null || {
+                log_error "Could not persist the M2M token-drain deadline."
+                exit 1
+            }
+        fi
+        now=$(date +%s)
+        if [ "$now" -lt "$not_before" ]; then
+            remaining=$((not_before - now))
+            M2M_ROTATION_CONTEXT_ARGS=(
+                -c "retired_m2m_client_id=${retired_client_id}"
+            )
+            log_info "Legacy M2M client is disabled; issued tokens are draining."
+            log_info "Cleanup resumes on the first deploy after ${remaining} seconds."
+            return 0
+        fi
+
+        log_step "Rotation 6/6: remove the drained client id from authorizers"
+        # shellcheck disable=SC2086  # stack list is space-separated by design
+        JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+            npx cdk deploy $authorizer_consumers --exclusively \
+            --require-approval never "${CONTEXT_ARGS[@]}" 2>&1 || {
+            log_error "Could not remove the drained M2M client id."
+            exit 1
+        }
+        aws ssm delete-parameters \
+            --names "$retired_id_parameter" "$not_before_parameter" \
+            --region "$AWS_REGION" >/dev/null || {
+            log_error "Rotation completed, but its SSM checkpoint could not be removed."
+            exit 1
+        }
+        M2M_ROTATION_CONTEXT_ARGS=()
+        log_info "Legacy Cognito M2M token drain complete"
+        return 0
+    fi
+
+    log_info "Rotating the legacy Cognito M2M client"
+    # migrate_legacy_m2m_secret_export created the replacement before this
+    # function runs. The retired client id is passed literally (it is not a
+    # secret), so authorizers do not retain a CloudFormation import that would
+    # prevent phase 5 from deleting the old client.
+    log_step "Rotation 1/6: allow both clients on every inbound authorizer"
+    # shellcheck disable=SC2086  # stack list is space-separated by design
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy $authorizer_consumers --exclusively --require-approval never \
+        "${CONTEXT_ARGS[@]}" \
+        -c "retired_m2m_client_id=${retired_client_id}" 2>&1 || {
+        log_error "Could not expand the M2M client allow-lists."
+        exit 1
+    }
+
+    log_step "Rotation 2/6: retain the replacement while publishing the old interface"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "${PREFIX}-auth" --exclusively --require-approval never \
+        "${CONTEXT_ARGS[@]}" -c retain_legacy_m2m_client=true 2>&1 || {
+        log_error "Could not reconcile the replacement and legacy M2M clients."
+        exit 1
+    }
+
+    log_step "Rotation 3/6: move the credential provider to the replacement"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "${PREFIX}-identity" --exclusively --require-approval never \
+        "${CONTEXT_ARGS[@]}" -c transition_m2m_consumers=true 2>&1 || {
+        log_error "Could not move the credential provider to the replacement client."
+        exit 1
+    }
+
+    log_step "Rotation 4/6: publish the replacement through the SSM interface"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "${PREFIX}-auth" --exclusively --require-approval never \
+        "${CONTEXT_ARGS[@]}" -c transition_m2m_consumers=true 2>&1 || {
+        log_error "Could not publish the replacement M2M client."
+        exit 1
+    }
+
+    log_step "Rotation 5/6: disable the old client and start the token drain"
+    aws ssm put-parameter --name "$retired_id_parameter" \
+        --type String --value "$retired_client_id" --overwrite \
+        --region "$AWS_REGION" >/dev/null || {
+        log_error "Could not persist the retired M2M client checkpoint."
+        exit 1
+    }
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "${PREFIX}-auth" --exclusively --require-approval never \
+        "${CONTEXT_ARGS[@]}" 2>&1 || {
+        log_error "Consumers use the replacement, but the old M2M client could not be deleted."
+        exit 1
+    }
+    now=$(date +%s)
+    not_before=$((now + drain_seconds))
+    aws ssm put-parameter --name "$not_before_parameter" \
+        --type String --value "$not_before" --overwrite \
+        --region "$AWS_REGION" >/dev/null || {
+        log_error "Client deleted, but the M2M token-drain deadline was not stored."
+        exit 1
+    }
+    M2M_ROTATION_CONTEXT_ARGS=(-c "retired_m2m_client_id=${retired_client_id}")
+    log_info "Legacy Cognito M2M client invalidated; issued tokens are draining."
+    log_info "Cleanup resumes on the first deploy after ${drain_seconds} seconds."
+}
+
+list_cloudformation_imports() {
+    local export_name="$1"
+    local result
+    if result=$(aws cloudformation list-imports \
+        --export-name "$export_name" \
+        --region "$AWS_REGION" \
+        --query Imports \
+        --output text 2>&1); then
+        printf '%s\n' "$result"
+        return 0
+    fi
+
+    # CloudFormation returns ValidationError, rather than an empty list, when
+    # an existing export has no consumers. That is the expected post-handoff
+    # state; preserve all other failures (for example, AccessDenied).
+    if [[ "$result" == *"ValidationError"* \
+        && "$result" == *"is not imported by any stack"* ]]; then
+        printf 'None\n'
+        return 0
+    fi
+    printf '%s\n' "$result" >&2
+    return 1
+}
+
+prepare_orchestrator_observability_handoff() {
+    local target_generation="${ORCHESTRATOR_RUNTIME_GENERATION:-1}"
+    [ "$target_generation" -gt 1 ] || return 0
+
+    local runtime_stack="${PREFIX}-runtime-orchestrator"
+    local observability_stack="${PREFIX}-observability"
+    local current_id current_arn current_generation=1
+    current_id=$(aws cloudformation describe-stacks \
+        --stack-name "$runtime_stack" \
+        --region "$AWS_REGION" \
+        --query "Stacks[0].Outputs[?OutputKey=='RuntimeId'].OutputValue | [0]" \
+        --output text 2>/dev/null) || {
+        local stack_count
+        stack_count=$(live_stack_count "${runtime_stack}") || {
+            log_error "Could not determine whether $runtime_stack exists."
+            exit 1
+        }
+        [ "$stack_count" = "0" ] && return 0
+        log_error "Could not read the current orchestrator runtime generation."
+        exit 1
+    }
+    [ "$current_id" != "None" ] || return 0
+    if [[ "$current_id" =~ _g([0-9]+)- ]]; then
+        current_generation="${BASH_REMATCH[1]}"
+    fi
+    [ "$target_generation" -gt "$current_generation" ] || return 0
+    if [ "$target_generation" -ne $((current_generation + 1)) ]; then
+        log_error "Orchestrator runtime generation must advance one step at a time."
+        log_error "Current: $current_generation   Requested: $target_generation"
+        exit 1
+    fi
+
+    current_arn=$(aws cloudformation describe-stacks \
+        --stack-name "$runtime_stack" \
+        --region "$AWS_REGION" \
+        --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue | [0]" \
+        --output text) || {
+        log_error "Could not read the current orchestrator runtime ARN."
+        exit 1
+    }
+    [ -n "$current_arn" ] && [ "$current_arn" != "None" ] || {
+        log_error "$runtime_stack has no RuntimeArn output."
+        exit 1
+    }
+
+    local export_names export_name imports needs_handoff=0
+    export_names=$(aws cloudformation list-exports \
+        --region "$AWS_REGION" \
+        --query "Exports[?Value=='${current_arn}' && starts_with(Name, '${runtime_stack}:')].Name" \
+        --output text) || {
+        log_error "Could not inspect runtime export consumers."
+        exit 1
+    }
+    for export_name in $export_names; do
+        [ "$export_name" != "None" ] || continue
+        imports=$(list_cloudformation_imports "$export_name") || {
+            log_error "Could not inspect imports of runtime export $export_name."
+            exit 1
+        }
+        [[ " $imports " == *" $observability_stack "* ]] && needs_handoff=1
+    done
+    [ "$needs_handoff" = "1" ] || return 0
+
+    # Remove the target generation from the normal context. The handoff must
+    # retain the CURRENT Logs DeliverySource logical ID while replacing only
+    # Observability's cross-stack token with the identical literal ARN.
+    local -a handoff_context=()
+    local i
+    for ((i = 0; i < ${#CONTEXT_ARGS[@]}; i++)); do
+        if [ "${CONTEXT_ARGS[$i]}" = "-c" ] \
+            && [[ "${CONTEXT_ARGS[$((i + 1))]:-}" == orchestrator_runtime_generation=* ]]; then
+            ((i += 1))
+            continue
+        fi
+        handoff_context+=("${CONTEXT_ARGS[$i]}")
+    done
+
+    log_step "Runtime handoff 1/3: release Observability's current runtime export import"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "$observability_stack" --exclusively \
+        --require-approval never "${handoff_context[@]}" \
+        -c "orchestrator_runtime_generation=${current_generation}" \
+        -c "runtime_observability_arn_override=${current_arn}" 2>&1 || {
+        log_error "Could not pin Observability to the current runtime ARN."
+        exit 1
+    }
+
+    for export_name in $export_names; do
+        [ "$export_name" != "None" ] || continue
+        imports=$(list_cloudformation_imports "$export_name") || {
+            log_error "Could not verify the runtime export handoff."
+            exit 1
+        }
+        if [[ " $imports " == *" $observability_stack "* ]]; then
+            log_error "Observability still imports $export_name after the handoff."
+            exit 1
+        fi
+    done
+    ORCHESTRATOR_OBSERVABILITY_HANDOFF=1
+    log_info "Runtime handoff prepared; the current ARN remains monitored as a literal."
+}
+
+rebind_orchestrator_observability() {
+    [ "$ORCHESTRATOR_OBSERVABILITY_HANDOFF" = "1" ] || return 0
+    log_step "Runtime handoff 3/3: bind Observability to the replacement runtime"
+    JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk deploy "${PREFIX}-observability" --exclusively \
+        --require-approval never "${CONTEXT_ARGS[@]}" 2>&1 || {
+        log_error "Runtime replaced, but Observability could not bind to it."
+        log_error "Re-run the deployment; the handoff is resumable."
+        exit 1
+    }
+    ORCHESTRATOR_OBSERVABILITY_HANDOFF=0
+}
+
+# Independent stacks deploy in parallel; CDK still waits for every edge. app.py
+# chains the stacks that create Cedar policies, since CreatePolicy is not
+# idempotent on retry. --hotswap swaps Lambda code without CloudFormation.
+cdk_deploy_flags() {
+    CDK_DEPLOY_FLAGS=(--concurrency 6)
+    [ "$HOTSWAP" = "1" ] && CDK_DEPLOY_FLAGS+=(--hotswap)
+    return 0
+}
+
+deploy_stacks() {
+    local stack only=()
+    cdk_deploy_flags
+    # An explicit --stack deploys exactly the stacks named: without
+    # --exclusively, cdk also deploys every stack the target depends on, so
+    # redeploying one use-case stack shipped pending changes in the shared
+    # gateway. --module and --team keep pulling dependencies in, which is what
+    # lets a module deploy on its own. Compatibility work still runs before
+    # every target set, so deploying a gateway/runtime cannot pull Auth across
+    # the unsafe legacy export.
+    [ -n "${STACK_FILTER:-}" ] && only=(--exclusively)
+    acquire_m2m_deployment_lock
+    switch_issuer_consumers_first
+    migrate_legacy_m2m_secret_export
+    rotate_legacy_m2m_client
+    case " $* " in
+        *" ${PREFIX}-runtime-orchestrator "*)
+            prepare_orchestrator_observability_handoff
+            ;;
+    esac
+    for stack in "$@"; do
+        if [ "$ORCHESTRATOR_OBSERVABILITY_HANDOFF" = "1" ] \
+            && [ "$stack" = "${PREFIX}-runtime-orchestrator" ]; then
+            log_step "Runtime handoff 2/3: create the replacement runtime"
+        fi
+        log_step "Deploying: $stack"
+        JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+            npx cdk deploy "$stack" "${only[@]}" "${CDK_DEPLOY_FLAGS[@]}" --require-approval never \
+            "${CONTEXT_ARGS[@]}" "${M2M_ROTATION_CONTEXT_ARGS[@]}" 2>&1 || {
+            log_error "Failed to deploy $stack"
+            log_error "Check CloudFormation console for details."
+            exit 1
+        }
+    done
+    case " $* " in
+        *" ${PREFIX}-observability "*) : ;;
+        *) rebind_orchestrator_observability ;;
+    esac
+    release_m2m_deployment_lock
+}
+
+# The destroy counterpart. `cdk destroy STACK` without --exclusively walks the
+# dependency graph and deletes every stack that DEPENDS ON the target too — the
+# mirror image of `cdk deploy` pulling dependencies in. Tearing down one module
+# would silently remove the shared platform from under the other teams (the
+# blast radius grew when the runtimes gained a dependency on networking), so a
+# targeted destroy is always --exclusively. CloudFormation then refuses with
+# "Export ... cannot be deleted as it is in use by <stack>", naming the consumer.
+# The cascade stays for `destroy --all`, where it is what was asked for.
+destroy_stacks() {
+    local stack rc=0
+    if [ "$#" -eq 0 ]; then
+        JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+            npx cdk destroy --all --force "${CONTEXT_ARGS[@]}" 2>&1 || rc=1
+        return "$rc"
+    fi
+    # cdk destroy prints "No stacks match" and exits 0 for a stack the config does not
+    # synthesize, so a --stack whose use case already left platform.yaml stayed live,
+    # silently. (A --module or --team may name a stack this footprint leaves out.)
+    local known
+    if [ -n "${STACK_FILTER:-}" ]; then
+        known=$(JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 npx cdk ls "${CONTEXT_ARGS[@]}" 2>/dev/null) || {
+            log_error "Could not list the stacks of this platform.yaml (cdk ls failed), so nothing was destroyed."
+            return 1
+        }
+        for stack in "$@"; do
+            grep -qxF -- "$stack" <<<"$known" && continue
+            log_error "$stack is not a stack of the current platform.yaml, so destroy cannot see it."
+            log_error "Put back the entry that built it and destroy it again, or delete it yourself:"
+            log_error "  aws cloudformation delete-stack --stack-name $stack (docs/USE_CASE_REMOVAL.md)"
+            return 1
+        done
+    fi
+    for stack in "$@"; do
+        log_step "Destroying: $stack (this stack only)"
+        JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+            npx cdk destroy "$stack" --exclusively --force "${CONTEXT_ARGS[@]}" 2>&1 || {
+            rc=1
+            log_error "Failed to destroy $stack"
+            log_error "If the error above names an export in use, another stack depends on this one."
+            log_error "Destroy the dependents first, or run 'destroy --all' for the whole environment."
+        }
+    done
+    return "$rc"
+}
+
+cdk_bootstrap() {
+    log_header "CDK Bootstrap"
+    local bootstrap_log
+    bootstrap_log=$(mktemp)
+    if JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+        npx cdk bootstrap "aws://$ACCOUNT_ID/$AWS_REGION" >"$bootstrap_log" 2>&1; then
+        # "Already bootstrapped" also exits 0 — both are success.
+        log_info "Bootstrap OK for aws://$ACCOUNT_ID/$AWS_REGION"
+        rm -f "$bootstrap_log"
+    else
+        log_error "CDK bootstrap failed for aws://$ACCOUNT_ID/$AWS_REGION. Output:"
+        cat "$bootstrap_log"
+        rm -f "$bootstrap_log"
+        log_error "Common causes: wrong AWS account/profile, or missing IAM permissions"
+        log_error "to create the CDK bootstrap stack (CDKToolkit). Fix and retry."
+        exit 1
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Guided Workshop Helpers (workshop action)
+# ═══════════════════════════════════════════════════════════════
+pause() {
+    [ "${NON_INTERACTIVE:-0}" = "1" ] && return 0
+    echo ""
+    echo -e "${BOLD}Press ENTER to continue...${NC}"
+    read -r
+}
+
+run_verify() {
+    local module="$1" cont
+    log_step "Verifying module $module: ${MODULE_VERIFY[$module]}"
+    if PROJECT_NAME="$PROJECT_NAME" ENVIRONMENT="$ENVIRONMENT" PREFIX="$PREFIX" \
+        AWS_REGION="${AWS_REGION:-us-east-1}" bash -c "${MODULE_VERIFY[$module]}"; then
+        log_info "✓ Module $module verified"
+    else
+        log_error "✗ Module $module verification failed"
+        if [ "${NON_INTERACTIVE:-0}" = "1" ]; then
+            log_error "Aborting (NON_INTERACTIVE=1 cannot prompt)."
+            exit 1
+        fi
+        read -rp "Continue anyway? [y/N]: " cont
+        [[ "$cont" =~ ^[Yy] ]] || { log_error "Aborting workshop."; exit 1; }
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Migration planning (migrate action) — read-only, never needs --yes
+# ═══════════════════════════════════════════════════════════════
+migrate_plan() {
+    # Renders the migration: block of the manifest (infra_utils.platform_config
+    # --plan) and, with credentials, reports which expected secrets already
+    # exist. describe-secret and get-caller-identity are the only AWS calls.
+    local py name secret_name names=()
+    if [ ! -f "$PLATFORM_CONFIG" ]; then
+        log_error "No $PLATFORM_CONFIG — migrate plan reads the migration: block from the manifest."
+        log_error "Start from the preset:  $0 migrate plan --profile migration"
+        exit 1
+    fi
+    py="$PROJECT_DIR/.venv/bin/python"; [ -x "$py" ] || py="python3"
+    # The account selects the side of a federated deployment; app.py and the
+    # contract read CDK_DEFAULT_ACCOUNT from the environment, so export it.
+    local have_creds=0
+    if ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null); then
+        have_creds=1
+        export CDK_DEFAULT_ACCOUNT="$ACCOUNT_ID"
+        AWS_REGION=${AWS_REGION:-$(aws configure get region 2>/dev/null || echo "us-east-1")}
+    fi
+    (cd "$PROJECT_DIR" && "$py" -m infra_utils.platform_config --plan "$PLATFORM_CONFIG") || exit 1
+    [ -n "${MIGRATION_SECRETS:-}" ] || return 0
+    echo ""
+    if [ "$have_creds" != "1" ]; then
+        log_warn "Secret check skipped (no AWS credentials)"
+        return 0
+    fi
+    log_step "Secrets Manager check (read-only, region $AWS_REGION)"
+    IFS=',' read -ra names <<< "$MIGRATION_SECRETS"
+    for name in "${names[@]}"; do
+        secret_name="${PROJECT_NAME}/${ENVIRONMENT}/migration/${name}"
+        if aws secretsmanager describe-secret --secret-id "$secret_name" --region "$AWS_REGION" >/dev/null 2>&1; then
+            log_info "found:   $secret_name"
+        else
+            log_warn "missing: $secret_name"
+            log_warn "         Read the value from stdin (keeps plaintext out of shell history):"
+            log_warn "         aws secretsmanager create-secret --name $secret_name --region $AWS_REGION --secret-string file:///dev/stdin"
+        fi
+    done
+}
+
+migrate_readiness() {
+    # Configuration-only cutover gate. A target may be safely deployed while
+    # this returns non-zero; customer traffic must not move until it returns 0.
+    local py
+    if [ ! -f "$PLATFORM_CONFIG" ]; then
+        log_error "No $PLATFORM_CONFIG — migrate readiness reads the migration: block."
+        exit 1
+    fi
+    py="$PROJECT_DIR/.venv/bin/python"; [ -x "$py" ] || py="python3"
+    (cd "$PROJECT_DIR" && "$py" -m infra_utils.platform_config \
+        --readiness --effective-env "$PLATFORM_CONFIG")
+}
+
+migrate_data_check() {
+    # Source-specific data movement never rides inside CDK deployment. These
+    # commands only render and validate the versioned plan.
+    local mode="$1" py flag="--data-plan"
+    if [ ! -f "$PLATFORM_CONFIG" ]; then
+        log_error "No $PLATFORM_CONFIG — migrate data reads the migration: block."
+        exit 1
+    fi
+    [ "$mode" = "readiness" ] && flag="--data-readiness"
+    py="$PROJECT_DIR/.venv/bin/python"; [ -x "$py" ] || py="python3"
+    (cd "$PROJECT_DIR" && "$py" -m infra_utils.platform_config \
+        "$flag" --effective-env "$PLATFORM_CONFIG")
+}
+
+migrate_cutover_check() {
+    # Renders and validates an external event/traffic procedure. It never
+    # changes a trigger, queue, schedule, webhook, or router.
+    local mode="$1" py flag="--cutover-plan"
+    if [ ! -f "$PLATFORM_CONFIG" ]; then
+        log_error "No $PLATFORM_CONFIG — migrate cutover reads the migration: block."
+        exit 1
+    fi
+    [ "$mode" = "readiness" ] && flag="--cutover-readiness"
+    py="$PROJECT_DIR/.venv/bin/python"; [ -x "$py" ] || py="python3"
+    (cd "$PROJECT_DIR" && "$py" -m infra_utils.platform_config \
+        "$flag" --effective-env "$PLATFORM_CONFIG")
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Deploy Summary (Requirement 2.5)
+# ═══════════════════════════════════════════════════════════════
+sanitize_public_metadata() {
+    # Reuse the dashboard's deny-by-default metadata contract. Raw AWS values
+    # are filtered in-memory and never reach a transcript or artifact.
+    local kind="$1" suffix="${2:-}"
+    "$PROJECT_DIR/.venv/bin/python" -c '
+import json
+import sys
+
+from dashboard.monitor import (
+    SAFE_EXPORT_STACK_OUTPUTS,
+    SAFE_SSM_PARAMETERS,
+    safe_stack_outputs,
+)
+
+kind, suffix, root = sys.argv[1:4]
+raw = json.load(sys.stdin)
+if kind in {"stack", "stack-export"}:
+    allowlist = SAFE_EXPORT_STACK_OUTPUTS if kind == "stack-export" else None
+    safe = (
+        safe_stack_outputs(suffix, raw, allowlist=allowlist)
+        if allowlist is not None
+        else safe_stack_outputs(suffix, raw)
+    )
+    result = [
+        {"OutputKey": key, "OutputValue": value}
+        for key, value in safe.items()
+    ]
+elif kind == "ssm":
+    prefix = root.rstrip("/") + "/"
+    result = []
+    for parameter in raw:
+        name = parameter.get("Name", "")
+        relative = name.removeprefix(prefix) if name.startswith(prefix) else ""
+        if relative in SAFE_SSM_PARAMETERS and "Value" in parameter:
+            result.append({"Name": name, "Value": parameter["Value"]})
+else:
+    raise SystemExit(f"unknown public metadata kind: {kind}")
+print(json.dumps(result, separators=(",", ":")))
+' "$kind" "$suffix" "/${PROJECT_NAME}/${ENVIRONMENT}"
+}
+
+print_summary() {
+    log_header "Deployment Summary"
+    local stack suffix raw_outputs safe_outputs stacks
+    stacks=$(aws cloudformation list-stacks \
+        --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+        --query "StackSummaries[?starts_with(StackName,'${PREFIX}')].StackName" \
+        --output text --region "$AWS_REGION" 2>/dev/null) || {
+        log_warn "Could not list stacks for the deployment summary."
+        return 0
+    }
+    for stack in $stacks; do
+        echo -e "\n${BOLD}${BLUE}$stack${NC}:"
+        suffix="${stack#"$PREFIX-"}"
+        raw_outputs=$(aws cloudformation describe-stacks \
+            --stack-name "$stack" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs" \
+            --output json 2>/dev/null) || {
+            log_warn "Could not read reviewed outputs for $stack."
+            continue
+        }
+        safe_outputs=$(printf '%s' "$raw_outputs" \
+            | sanitize_public_metadata stack "$suffix") || {
+            log_warn "Could not filter reviewed outputs for $stack."
+            continue
+        }
+        printf '%s' "$safe_outputs" | "$PROJECT_DIR/.venv/bin/python" -c '
+import json
+import sys
+
+outputs = json.load(sys.stdin)
+if not outputs:
+    print("  (no reviewed public outputs)")
+for output in outputs:
+    print("  {}: {}".format(output["OutputKey"], output["OutputValue"]))
+'
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Export Utility (Requirement 15)
+# ═══════════════════════════════════════════════════════════════
+export_artifacts() {
+    log_header "Exporting Artifacts"
+    local stamp export_file safe_outputs_file stacks stack suffix
+    local raw_params params raw_outputs stack_outputs
+    acquire_m2m_deployment_lock
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    export_file="${PROJECT_DIR}/workshop-outputs-${stamp}.json"
+    safe_outputs_file="$(mktemp)"
+
+    # Collect only the reviewed public SSM interface. Unknown parameters,
+    # including secret names and customer-created values, remain private.
+    raw_params=$(aws ssm get-parameters-by-path \
+        --path "/${PROJECT_NAME}/${ENVIRONMENT}" \
+        --recursive --region "$AWS_REGION" \
+        --query "Parameters[*].{Name:Name,Value:Value}" \
+        --output json 2>/dev/null) || {
+        log_error "Could not read SSM parameters for export."
+        return 1
+    }
+    params=$(printf '%s' "$raw_params" \
+        | sanitize_public_metadata ssm "") || {
+        log_error "Could not filter SSM parameters for export."
+        return 1
+    }
+
+    # Collect only reviewed public outputs for each known stack type.
+    stacks=$(aws cloudformation list-stacks \
+        --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+        --query "StackSummaries[?starts_with(StackName,'${PREFIX}')].StackName" \
+        --output text --region "$AWS_REGION" 2>/dev/null) || {
+        log_error "Could not list stacks for export."
+        return 1
+    }
+    for stack in $stacks; do
+        suffix="${stack#"$PREFIX-"}"
+        raw_outputs=$(aws cloudformation describe-stacks \
+            --stack-name "$stack" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs" \
+            --output json 2>/dev/null) || {
+            log_error "Could not read outputs for $stack."
+            return 1
+        }
+        stack_outputs=$(printf '%s' "$raw_outputs" \
+            | sanitize_public_metadata stack-export "$suffix") || {
+            log_error "Could not filter outputs for $stack."
+            return 1
+        }
+        printf '%s\n' "$stack_outputs" >> "$safe_outputs_file"
+    done
+
+    "$PROJECT_DIR/.venv/bin/python" -c '
+import json
+import os
+import sys
+import tempfile
+
+project, environment, region, account_id, destination, outputs_path = sys.argv[1:]
+params = json.load(sys.stdin)
+outputs = []
+with open(outputs_path, encoding="utf-8") as source:
+    for line in source:
+        outputs.extend(json.loads(line))
+data = {
+    "project": project,
+    "environment": environment,
+    "region": region,
+    "account_id": account_id,
+    "ssm_parameters": params,
+    "stack_outputs": outputs,
+}
+descriptor, temporary = tempfile.mkstemp(
+    prefix=f".{os.path.basename(destination)}.",
+    dir=os.path.dirname(destination),
+)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+        json.dump(data, target, indent=2)
+        target.write("\n")
+        target.flush()
+        os.fsync(target.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+except Exception:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+' "$PROJECT_NAME" "$ENVIRONMENT" "$AWS_REGION" "$ACCOUNT_ID" \
+        "$export_file" "$safe_outputs_file" <<<"$params"
+    rm -f "$safe_outputs_file"
+    release_m2m_deployment_lock
+    log_info "Exported to: ${export_file}"
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════
+ACTION="${1:-deploy}"
+shift || true
+
+# ── 'config' action: show or reset saved answers (no AWS access needed) ──
+if [ "$ACTION" = "config" ]; then
+    if [ "${1:-}" = "--reset" ]; then
+        rm -f "$CONFIG_FILE"
+        log_info "Removed workshop.env"
+        exit 0
+    fi
+    if [ -f "$PLATFORM_CONFIG" ]; then
+        echo "# platform.yaml → effective values (env vars override):"
+        py="$PROJECT_DIR/.venv/bin/python"; [ -x "$py" ] || py="python3"
+        "$py" -m infra_utils.platform_config \
+            --export --effective-env "$PLATFORM_CONFIG" || exit 1
+        echo ""
+    fi
+    if [ -f "$CONFIG_FILE" ]; then
+        echo "# workshop.env (wizard answers; platform.yaml overrides):"
+        cat "$CONFIG_FILE"
+    elif [ ! -f "$PLATFORM_CONFIG" ]; then
+        echo "none"
+    fi
+    exit 0
+fi
+
+# Parse flags
+STACK_FILTER=""
+PROFILE=""
+TEAM=""
+MODULE=""
+FROM_MODULE=""
+DRY_RUN=0
+YES=0
+HOTSWAP=0
+require_flag_value() {
+    # $1 = flag name, $2 = number of remaining args after the flag
+    if [ "$2" -lt 2 ]; then
+        log_error "$1 requires a value (e.g. $1 <value>)."
+        exit 1
+    fi
+}
+
+# ── 'design' action: the manifest and what it means, nothing deployed ──
+# Design → Build → Verify. `--profile X` has already been materialized as the
+# manifest by the pre-scan; here the file is validated (placeholders are
+# errors: the operator sees the field and the fix) and the plan is printed
+# from the contract. Read-only; the only AWS call is get-caller-identity, and
+# only to pick the side of a federated deployment.
+if [ "$ACTION" = "design" ]; then
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --profile) require_flag_value "--profile" "$#"; shift 2 ;;
+            *) log_error "Unknown option for design: '$1' (valid: --profile PROFILE)"; exit 1 ;;
+        esac
+    done
+    if [ ! -f "$PLATFORM_CONFIG" ]; then
+        log_error "No $PLATFORM_CONFIG yet. Start from a profile:  $0 design --profile greenfield"
+        log_error "Profiles: $(valid_profiles)"
+        exit 1
+    fi
+    py="$PROJECT_DIR/.venv/bin/python"; [ -x "$py" ] || py="python3"
+    if ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null); then
+        export CDK_DEFAULT_ACCOUNT="$ACCOUNT_ID"
+    fi
+    log_step "Design: $PLATFORM_CONFIG"
+    (cd "$PROJECT_DIR" && "$py" -m infra_utils.platform_config \
+        --design --effective-env "$PLATFORM_CONFIG") || {
+        log_error "Fix the manifest above, then run: $0 design"
+        exit 1
+    }
+    exit 0
+fi
+
+# ── 'build' is 'deploy' by its Design → Build → Verify name ──
+[ "$ACTION" = "build" ] && ACTION="deploy"
+
+# ── 'migrate' actions: read-only, before any prerequisite/credential gate ──
+# They take no --yes. `readiness` intentionally exits non-zero until every
+# in-scope gate is approved and an external traffic cutover is requested.
+if [ "$ACTION" = "migrate" ]; then
+    MIGRATE_SUB="${1:-}"; shift || true
+    MIGRATE_DATA_SUB=""
+    MIGRATE_CUTOVER_SUB=""
+    if [ "$MIGRATE_SUB" = "data" ]; then
+        MIGRATE_DATA_SUB="${1:-}"
+        shift || true
+    elif [ "$MIGRATE_SUB" = "cutover" ]; then
+        MIGRATE_CUTOVER_SUB="${1:-}"
+        shift || true
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --profile)
+                require_flag_value "--profile" "$#"
+                if [ "$MIGRATE_SUB" != "plan" ]; then
+                    log_error "--profile is only valid for 'migrate plan'; readiness requires your completed platform.yaml"
+                    exit 1
+                fi
+                shift 2
+                ;;
+            *) log_error "Unknown option for migrate: '$1' (valid for plan: --profile PROFILE)"; exit 1 ;;
+        esac
+    done
+    case "$MIGRATE_SUB" in
+        plan) migrate_plan ;;
+        readiness) migrate_readiness ;;
+        data)
+            case "$MIGRATE_DATA_SUB" in
+                plan|readiness) migrate_data_check "$MIGRATE_DATA_SUB" ;;
+                *)
+                    log_error "Unknown migrate data sub-action: '${MIGRATE_DATA_SUB:-(none)}'. Usage: $0 migrate data plan | readiness"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        cutover)
+            case "$MIGRATE_CUTOVER_SUB" in
+                plan|readiness) migrate_cutover_check "$MIGRATE_CUTOVER_SUB" ;;
+                *)
+                    log_error "Unknown migrate cutover sub-action: '${MIGRATE_CUTOVER_SUB:-(none)}'. Usage: $0 migrate cutover plan | readiness"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        *)
+            log_error "Unknown migrate sub-action: '${MIGRATE_SUB:-(none)}'. Usage: $0 migrate plan [--profile PROFILE] | readiness | data plan | data readiness | cutover plan | cutover readiness"
+            exit 1
+            ;;
+    esac
+    exit 0
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --stack)   require_flag_value "--stack" "$#";   STACK_FILTER="$2"; shift 2 ;;
+        --profile) require_flag_value "--profile" "$#"; PROFILE="$2"; shift 2 ;;
+        --team)    require_flag_value "--team" "$#";    TEAM="$2"; shift 2 ;;
+        --module)  require_flag_value "--module" "$#";  MODULE="$2"; shift 2 ;;
+        --from)    require_flag_value "--from" "$#";    FROM_MODULE="$2"; shift 2 ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --yes)     YES=1; shift ;;
+        --hotswap) HOTSWAP=1; shift ;;
+        *)
+            # Fail closed: `--stakc identity` or `--stack=identity` used to be
+            # silently discarded here, leaving no target and escalating to
+            # `cdk deploy --all`. A typo must never deploy more than asked.
+            log_error "Unknown option or argument: '$1'"
+            log_error "Valid options: --stack --profile --team --module --from --dry-run --yes --hotswap"
+            log_error "(values are space-separated: --stack NAME, not --stack=NAME)"
+            exit 1
+            ;;
+    esac
+done
+
+# Workshop action: default the profile.
+[ "$ACTION" = "workshop" ] && PROFILE="${PROFILE:-greenfield}"
+
+# ── Fail closed on VALUES, for every action ──
+# A misspelled --profile used to be validated only for the workshop action:
+# on plain deploy it skipped its feature flags without a word and fell
+# through to `cdk deploy --all` — a typo produced a LARGER deployment.
+if [ -n "$PROFILE" ] && [ ! -f "$PROJECT_DIR/presets/$PROFILE.yaml" ]; then
+    # Normally already caught by materialize_preset in the pre-scan; this
+    # covers the paths that skip materialization (--dry-run).
+    log_error "Unknown profile: '$PROFILE'. Valid profiles: $(valid_profiles)"
+    exit 1
+fi
+if [ "$ACTION" = "workshop" ] \
+    && { [ "$PROFILE" = "production" ] \
+        || [ "${DEPLOYMENT_MODE:-workshop}" = "production" ]; }; then
+    log_error "The guided workshop runner is intentionally disposable and cannot run deployment.mode=production."
+    log_error "Use '$0 design' to review the production plan, then '$0 build' after replacing every placeholder."
+    exit 1
+fi
+# --hotswap updates Lambda code in place and leaves CloudFormation's record of
+# it stale (drift), so it is for a test environment's inner loop only. A
+# release candidate always gets a real deploy.
+if [ "$HOTSWAP" = "1" ]; then
+    if [ "$ACTION" != "deploy" ] && [ "$ACTION" != "build" ]; then
+        log_error "--hotswap applies to deploy only."
+        exit 1
+    fi
+    if [ "${DEPLOYMENT_MODE:-workshop}" = "production" ]; then
+        log_error "--hotswap is refused under deployment.mode production: it drifts CloudFormation."
+        exit 1
+    fi
+fi
+if [ -n "$TEAM" ] && [ -z "${TEAM_MAP[$TEAM]:-}" ]; then
+    log_error "Unknown team: '$TEAM'. Valid teams: ${!TEAM_MAP[*]}"
+    exit 1
+fi
+# --stack takes full stack names; a short name like 'identity' would only
+# fail deep inside cdk ("No stacks match") after bootstrap has already run.
+for _s in ${STACK_FILTER:-}; do
+    case "$_s" in
+        "$PREFIX"-*) : ;;
+        *)
+            log_error "Unknown stack: '$_s' — stacks are full names like ${PREFIX}-identity."
+            log_error "List them with: $0 ls"
+            exit 1
+            ;;
+    esac
+done
+
+# Profile flags arrive via the materialized platform.yaml (pre-scan above),
+# not per-run env exports — that is what makes them survive to the NEXT run.
+
+# Fail fast on missing ORG_ID before any CDK command runs
+check_org_id
+
+# Resolve stack targets
+CDK_STACKS=""
+if [ -n "$STACK_FILTER" ]; then
+    CDK_STACKS="$STACK_FILTER"
+elif [ "$MODULE" = "D" ]; then
+    log_info "Module D (CI/CD Pipeline) is a guided module — see .gitlab-ci.yml as the reference implementation; no stacks to deploy."
+    exit 0
+elif [ -n "$MODULE" ] && [ -n "${MODULE_MAP[$MODULE]:-}" ]; then
+    CDK_STACKS="${MODULE_MAP[$MODULE]}"
+    log_info "Workshop Module $MODULE → Stacks: $CDK_STACKS"
+elif [ -n "$MODULE" ]; then
+    log_error "Unknown module: '$MODULE'. Valid modules: $VALID_MODULES"
+    exit 1
+elif [ -n "$TEAM" ] && [ -n "${TEAM_MAP[$TEAM]:-}" ]; then
+    CDK_STACKS="${TEAM_MAP[$TEAM]}"
+    log_info "Team $TEAM → Stacks: $CDK_STACKS"
+fi
+
+# A workshop dry run makes zero AWS calls — skip everything that needs them.
+if [ "$ACTION" = "workshop" ] && [ "$DRY_RUN" = "1" ]; then
+    log_info "Dry run: skipping prerequisite and credential checks (no AWS calls)"
+else
+    check_prereqs
+    check_credentials
+    setup_venv
+fi
+
+cd "$PROJECT_DIR"
+
+# If IDP_CLIENT_SECRET or a 3LO *_CLIENT_SECRET came from the environment, move
+# it into Secrets Manager before any context args are built (plaintext never
+# reaches the CDK CLI).
+if [ "$DRY_RUN" != "1" ]; then
+    # The region must be FINAL before this first region-scoped AWS write: the
+    # upserts store the secret in $AWS_REGION and unset the plaintext, so
+    # prompting for the region afterwards (as deploy/workshop used to) could
+    # strand the secret in the provisional region with no value left to
+    # re-store (usability review, finding 7).
+    case "$ACTION" in deploy | workshop) prompt_region ;; esac
+    validate_configured_idp_secret
+    upsert_idp_secret
+    upsert_3lo_secrets
+fi
+
+# Build CDK context args (populates the CONTEXT_ARGS array)
+build_context_args
+# The selected --module/--team may name stacks that only exist behind a
+# feature flag — enable those now (rebuilds CONTEXT_ARGS; env still wins).
+apply_selection_flags
+
+case "$ACTION" in
+    deploy)
+        if [ "${NON_INTERACTIVE:-0}" != "1" ]; then
+            prompt_agent_pattern
+            prompt_idp
+            upsert_idp_secret   # Store any newly prompted IdP secret; sets IDP_CLIENT_SECRET_NAME
+            build_context_args  # Rebuild with new values
+            save_config         # Persist answers for the next run (secrets excluded)
+        fi
+
+        cdk_bootstrap
+
+        log_header "Deploying"
+        if [ -n "$CDK_STACKS" ]; then
+            # shellcheck disable=SC2086  # stack list is space-separated by design
+            deploy_stacks $CDK_STACKS
+        else
+            confirm_footprint deploy
+            acquire_m2m_deployment_lock
+            switch_issuer_consumers_first
+            migrate_legacy_m2m_secret_export
+            rotate_legacy_m2m_client
+            prepare_orchestrator_observability_handoff
+            if [ "$ORCHESTRATOR_OBSERVABILITY_HANDOFF" = "1" ]; then
+                log_step "Runtime handoff 2/3: create the replacement runtime during full deployment"
+            fi
+            log_step "Deploying all stacks..."
+            cdk_deploy_flags
+            JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+                npx cdk deploy --all "${CDK_DEPLOY_FLAGS[@]}" --require-approval never \
+                "${CONTEXT_ARGS[@]}" "${M2M_ROTATION_CONTEXT_ARGS[@]}" 2>&1 || {
+                log_error "Deployment failed. Check CloudFormation console for details."
+                exit 1
+            }
+            # --all includes Observability after the runtime dependency, so it
+            # performs phase 3. Clear the in-process marker after success.
+            ORCHESTRATOR_OBSERVABILITY_HANDOFF=0
+            release_m2m_deployment_lock
+        fi
+
+        print_summary
+        ;;
+
+    workshop)
+        SEQUENCE="${PROFILE_MODULES[$PROFILE]}"
+        if [ -n "$FROM_MODULE" ]; then
+            case " $SEQUENCE " in
+                *" $FROM_MODULE "*) : ;;
+                *) log_error "--from $FROM_MODULE is not in the '$PROFILE' sequence ($SEQUENCE)"; exit 1 ;;
+            esac
+        fi
+
+        log_header "Guided Workshop — profile: $PROFILE"
+        log_info "Module sequence: $SEQUENCE"
+        log_info "Agent pattern: $AGENT_PATTERN"
+        [ "$DRY_RUN" = "1" ] && log_info "DRY RUN — nothing will be deployed"
+
+        if [ "$DRY_RUN" != "1" ] && [ "${NON_INTERACTIVE:-0}" != "1" ]; then
+            prompt_agent_pattern
+            prompt_idp
+            upsert_idp_secret   # Store any newly prompted IdP secret; sets IDP_CLIENT_SECRET_NAME
+            build_context_args  # Rebuild with new values
+            save_config         # Persist answers for the next run (secrets excluded)
+        fi
+
+        [ "$DRY_RUN" = "1" ] || cdk_bootstrap
+
+        SKIPPING=0
+        [ -n "$FROM_MODULE" ] && SKIPPING=1
+        for m in $SEQUENCE; do
+            if [ "$SKIPPING" = "1" ]; then
+                if [ "$m" = "$FROM_MODULE" ]; then SKIPPING=0
+                else log_info "Skipping module $m (--from $FROM_MODULE)"; continue; fi
+            fi
+            # Some modules' stacks only exist behind a feature flag — see MODULE_FLAGS.
+            apply_module_flags "$m"
+
+            title="${MODULE_EXPLAIN[$m]%%$'\n'*}"
+            log_header "Module $m — $title"
+            log_explain "${MODULE_EXPLAIN[$m]#*$'\n'}"
+            echo ""
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "[dry-run] Would deploy: ${MODULE_MAP[$m]}"
+                log_info "[dry-run] Would verify: ${MODULE_VERIFY[$m]}"
+                continue
+            fi
+            pause
+            # shellcheck disable=SC2086  # stack list is space-separated by design
+            deploy_stacks ${MODULE_MAP[$m]}
+            run_verify "$m"
+            pause
+        done
+
+        log_header "Workshop complete 🎉"
+        [ "$DRY_RUN" = "1" ] || print_summary
+        ;;
+
+    destroy)
+        log_header "Destroying"
+        [ -z "${CDK_STACKS:-}" ] && confirm_footprint destroy
+        acquire_m2m_deployment_lock
+        # No stacks selected means --all. Failures are no longer swallowed: a
+        # refused destroy is the guard against cascading, so it has to be seen.
+        # shellcheck disable=SC2086  # stack list is space-separated by design
+        destroy_stacks ${CDK_STACKS:-} || {
+            # shellcheck disable=SC2086
+            empty_unemptied_buckets && destroy_stacks ${CDK_STACKS:-}
+        } || exit 1
+        # Full destroy: also find what the current config could not see.
+        [ -z "${CDK_STACKS:-}" ] && sweep_leftovers
+        release_m2m_deployment_lock
+        ;;
+
+    verify)
+        # One configuration-aware health check: asks the deployment contract
+        # what this config promises and runs the matching tools; non-zero if
+        # any claim fails. Details: scripts/verify.py
+        "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/scripts/verify.py"
+        ;;
+
+    synth)
+        JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+            npx cdk synth "${CONTEXT_ARGS[@]}" ${CDK_STACKS:+$CDK_STACKS} \
+            ${STACK_FILTER:+--exclusively} 2>&1
+        ;;
+
+    diff)
+        JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+            npx cdk diff "${CONTEXT_ARGS[@]}" ${CDK_STACKS:+$CDK_STACKS} \
+            ${STACK_FILTER:+--exclusively} 2>&1
+        ;;
+
+    export)
+        export_artifacts
+        ;;
+
+    ls|list)
+        JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1 \
+            npx cdk ls "${CONTEXT_ARGS[@]}" 2>&1
+        ;;
+
+    *)
+        echo "Usage: $0 [doctor|design|build|verify|usecase|layer|deploy|workshop|destroy|synth|diff|export|ls|config|migrate] [OPTIONS]"
+        echo ""
+        echo "Actions (Design → Build → Verify):"
+        echo "  doctor             Read-only checks for tools, account, Region, secrets, model, and migration image"
+        echo "  design [--profile P]  Write platform.yaml from a preset, validate it, print the plan; deploys nothing"
+        echo "  build              Deploy what platform.yaml describes (same as deploy)"
+        echo "  usecase new NAME   Scaffold use-cases/NAME/ and enable it in platform.yaml; usecase list"
+        echo "  usecase add URL|PATH [--ref REF]  Copy a use case into use-cases/ and add its entries to platform.yaml"
+        echo "  usecase remove NAME  Delete use-cases/NAME/ and its links; changes no deployment"
+        echo "  usecase run NAME VERB [ARGS]  Run an operator command from use-cases/NAME/ops.py"
+        echo "  layer run NAME VERB [ARGS]    Run an operator command from layers/NAME/ops.py"
+        echo "  workshop           Guided module-by-module deploy: explain → deploy → verify → pause"
+        echo "  verify             Run every check this configuration promises; non-zero on failure"
+        echo "  migrate plan       Print the migration plan; read-only"
+        echo "  migrate readiness  Fail-closed evidence gate before customer traffic moves; read-only"
+        echo "  migrate data plan  Print the canonical data plan and digest; read-only"
+        echo "  migrate data readiness  Check data/network evidence against that digest; read-only"
+        echo "  migrate cutover plan  Print trigger/traffic plans and digests; read-only"
+        echo "  migrate cutover readiness  Fail closed until every cutover gate matches its digest"
+        echo "  config             Show saved answers (workshop.env)"
+        echo "  config --reset     Delete saved answers and start fresh"
+        echo ""
+        echo "Options:"
+        echo "  --stack STACK      Deploy (diff, synth, destroy) this stack only, not its dependencies"
+        echo "  --profile PROFILE  Starting profile ($(valid_profiles))"
+        echo "  --team TEAM        Team workstream (platform|agent|security)"
+        echo "  --module N         Workshop module number (3|4|5|6|7|8|9|A|B|C|D|E)"
+        echo "  --from MODULE      (workshop) Start at this module in the profile sequence"
+        echo "  --dry-run          (workshop) Print each module's stacks + verify command; no AWS calls"
+        echo "  --yes              Skip the full-footprint confirmation (deploy/destroy with no target)"
+        echo "  --hotswap          (deploy) Swap Lambda code in place; test environments only, drifts CloudFormation"
+        echo ""
+        echo "Environment Variables:"
+        echo "  NON_INTERACTIVE=1  Skip all prompts"
+        echo "  PROJECT_NAME       Project name (default: agentcore-workshop)"
+        echo "  ENVIRONMENT        Environment (default: dev)"
+        echo "  AWS_REGION         AWS region"
+        echo "  DEPLOYMENT_MODE    Lifecycle posture (workshop|production; production requires platform.yaml)"
+        echo "  IDP_TYPE           Identity provider (cognito|entra_id|okta|ping)"
+        echo "  MODEL_ID           Bedrock model ID override for all agents (default: in-code per pattern)"
+        echo "  ORCHESTRATOR_RUNTIME_GENERATION  Controlled runtime replacement generation (default: 1)"
+        echo "  FEDERATED_RETIRED_M2M_CLIENT_ID  Previous client ID during a federated token drain"
+        echo "  FEDERATED_M2M_CONSUMERS_UPDATED  Set to 1 only after every workload uses the replacement"
+        exit 1
+        ;;
+esac

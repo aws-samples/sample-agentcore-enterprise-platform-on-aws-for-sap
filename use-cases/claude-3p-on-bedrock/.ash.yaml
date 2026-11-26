@@ -1,0 +1,49 @@
+# ASH suppressions for this use case's own files and stack templates. The rule for a
+# suppression is the root .ash.yaml's; scripts/check-security.sh merges this file in.
+global_settings:
+  suppressions:
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/claude-3p-on-bedrock/docs/platform.example.yaml
+    reason: The flagged line names a Secrets Manager secret (agentcore/... or claude-3p/entra-oidc)
+      in an example or fixture platform.yaml; the value lives in Secrets Manager, never in the repo.
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/claude-3p-on-bedrock/platform.example.yaml
+    reason: The flagged line names a Secrets Manager secret (agentcore/... or claude-3p/entra-oidc)
+      in an example or fixture platform.yaml; the value lives in Secrets Manager, never in the repo.
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/claude-3p-on-bedrock/fixtures/contract/claude-3p-on-bedrock.yaml
+    reason: The flagged line names a Secrets Manager secret (agentcore/... or claude-3p/entra-oidc)
+      in an example or fixture platform.yaml; the value lives in Secrets Manager, never in the repo.
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/claude-3p-on-bedrock/fixtures/contract/claude-3p-on-bedrock-route53.yaml
+    reason: The flagged line names a Secrets Manager secret (agentcore/... or claude-3p/entra-oidc)
+      in an example or fixture platform.yaml; the value lives in Secrets Manager, never in the repo.
+    expiration: '2027-11-01'
+  - rule_id: SECRET-SECRET-KEYWORD
+    path: use-cases/claude-3p-on-bedrock/tests/test_claude_3p_on_bedrock_setup.py
+    reason: The flagged line names a Secrets Manager secret (agentcore/... or claude-3p/entra-oidc)
+      in an example or fixture platform.yaml; the value lives in Secrets Manager, never in the repo.
+    expiration: '2027-11-01'
+  - rule_id: SECRET-HEX-HIGH-ENTROPY-STRING
+    path: use-cases/claude-3p-on-bedrock/stack.py
+    reason: RELEASE_KEY_FPR is the fingerprint of Anthropic's public Claude Code release-signing GPG key,
+      which CodeBuild checks the downloaded binary against; public by design.
+    expiration: '2027-11-01'
+  - rule_id: CKV_DOCKER_2
+    path: use-cases/claude-3p-on-bedrock/gateway/image/Dockerfile
+    reason: Distroless image with no shell to run a HEALTHCHECK; ECS and the load balancer probe /healthz
+      (stack.py, elbv2.HealthCheck), which is what replaces an unhealthy task.
+    expiration: '2027-11-01'
+  - rule_id: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+    path: use-cases/claude-3p-on-bedrock/setup.py
+    reason: 'Operator wizard: the only URL opened is the fixed https STABLE_URL constant (Claude Code''s
+      stable release pointer).'
+    expiration: '2027-11-01'
+  - rule_id: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+    path: use-cases/claude-3p-on-bedrock/verify.py
+    reason: The URLs are this deployment's Gateway URL from SSM and the resource_metadata URL it returns;
+      both are refused unless they start with https://, so no file:// URL can be opened.
+    expiration: '2027-11-01'

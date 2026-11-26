@@ -1,0 +1,38 @@
+# The manifest is the only file the platform reads about your use case.
+# Everything here is validated at load time (infra_utils/platform_config.py).
+name: {{name}}                  # must match this directory's name
+owner: {{owner}}                # who reviews changes to this folder
+summary: {{summary}}
+# The docs/PLATFORM_INTERFACE.md version this use case is written against; a mismatch fails the synth.
+platform_interface: {{platform_interface}}
+# Core stack suffixes that must exist in the deployment's footprint. The
+# contract checks these per federation role, so a use case can never select
+# itself into an account that lacks its prerequisites.
+requires: [gateway]
+# Stack suffixes this use case adds (full name = <project>-<env>-<suffix>).
+# The uc- namespace is enforced: a contribution cannot collide with a core stack.
+stacks: [uc-{{name}}]
+# Module exposing build(app, platform_ctx, config). Default: stack.py
+entry: stack.py
+# Optional: machine clients the platform creates on its user pool and admits
+# to the shared Gateway (needs requires: [auth, gateway]). Scopes become
+# uc-{{name}}/<scope>; see CONTRIBUTING_USE_CASES.md before declaring any.
+# gateway_clients:
+#   - name: machine
+#     scopes: [read]
+# Optional: output keys of your stacks that `deploy.sh` prints in its summary
+# and export (all others stay private; one that resolves a secret fails synth).
+# public_outputs: [ApplicationUrl]
+# Optional: send this use case's alarms to the platform's ops topic. The platform
+# creates it even with observability.alarms off and publishes
+# ops-topic/arn.
+# alarm_topic: true
+# The pages the platform's entry docs list for this use case (scripts/gen_use_case_index.py).
+docs:
+  title: {{name}}
+  entry: walkthrough.md
+  enable: walkthrough.md#enable-build-verify
+  quickstart: walkthrough.md#enable-build-verify
+  remove: walkthrough.md#remove
+  pages:
+    - {title: Walkthrough, path: walkthrough.md}

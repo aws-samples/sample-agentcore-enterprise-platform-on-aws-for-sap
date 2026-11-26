@@ -1,0 +1,255 @@
+# cdk-nag suppressions for this use case's stacks. The rule for a suppression is the
+# root .cdk-nag.yaml's; scripts/check_cdk_nag.py loads this file beside it.
+suppressions:
+- rule: AwsSolutions-IAM4
+  stacks:
+  - uc-business-operations
+  - uc-business-operations-console
+  - uc-business-operations-knowledge
+  - uc-business-operations-runtime
+  applies_to:
+  - Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  - Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+  reason: CDK's default Lambda execution role. The two AWS-managed policies grant only CloudWatch Logs
+    writes and, for a function in the VPC, ENI management; every data permission is an inline, resource-scoped
+    grant beside them.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-L1
+  stacks:
+  - uc-business-operations
+  - uc-business-operations-console
+  - uc-business-operations-knowledge
+  - uc-business-operations-runtime
+  where:
+    Runtime: python3.13
+  reason: python3.13 is the runtime the layers, the agent image, the tests and CI are built on, and the
+    repo's declared Python. Moving to 3.14 is a deliberate, tested bump of all of them at once; a function
+    on any other runtime still fails this rule.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-L1
+  stacks:
+  - uc-business-operations
+  - uc-business-operations-console
+  - uc-business-operations-knowledge
+  - uc-business-operations-runtime
+  resources:
+  - AWS679f53fac002430cb0da5b7982bd2287*
+  - LogRetentionaae0aa3c5b4d4f87b02d85b201efdd8a*
+  - CustomS3AutoDeleteObjectsCustomResourceProviderHandler*
+  - PackSeedProviderframeworkonEvent*
+  where:
+    Runtime: nodejs24.x
+  reason: aws-cdk-lib's own provider functions (AwsCustomResource, LogRetention, the S3 auto-delete provider
+    and the custom_resources.Provider framework handler behind the pack seed). Their code and runtime are
+    CDK's, set to its NODEJS_LATEST, nodejs24.x, a supported LTS runtime; cdk-nag ranks against every runtime
+    aws-cdk-lib lists, which from 2.277 includes nodejs26.x. They move when aws-cdk-lib moves NODEJS_LATEST,
+    and a provider on any older Node still fails this rule.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations
+  - uc-business-operations-console
+  - uc-business-operations-knowledge
+  - uc-business-operations-runtime
+  applies_to:
+  - Action::s3:GetObject*
+  - Action::s3:GetBucket*
+  - Action::s3:List*
+  - Action::s3:DeleteObject*
+  - Action::s3:Abort*
+  - Action::kms:ReEncrypt*
+  - Action::kms:GenerateDataKey*
+  reason: The action sets CDK's grant_read / grant_read_write / grant_encrypt_decrypt / grant_publish
+    emit. Each statement is on one named bucket or one key, never on Resource *; an action wildcard outside
+    these sets still fails.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations
+  - uc-business-operations-console
+  - uc-business-operations-knowledge
+  - uc-business-operations-runtime
+  applies_to:
+  - Resource::<*Arn>/*
+  - Resource::<*Arn>:*
+  - Resource::arn:<AWS::Partition>:s3:::<SsmParameterValue*>/*
+  - Resource::arn:aws:s3:::<SsmParameterValue*>/*
+  reason: 'Children of one resource this deployment owns: objects of its own bucket (named directly or
+    read from its SSM parameter), the indexes of its own DynamoDB table, the versions of its own function,
+    the endpoints of its own runtime.'
+  expiration: '2027-05-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations
+  - uc-business-operations-console
+  - uc-business-operations-runtime
+  applies_to:
+  - Resource::arn:<AWS::Partition>:s3:::cdk-hnb659fds-assets-*/*
+  reason: Read of the CDK bootstrap asset bucket, which CDK's BucketDeployment, CodeBuild source and asset
+    grants emit. The bucket holds this account's synthesized assets, written only by the deploy role.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations-runtime
+  resources:
+  - BuildRoleDefaultPolicy*
+  applies_to:
+  - Resource::arn:<AWS::Partition>:logs:*:log-group:/aws/codebuild/<Build*>:*
+  - Resource::arn:<AWS::Partition>:codebuild:*:report-group/<Build*>-*
+  reason: 'CDK''s CodeBuild project defaults: its own log group''s streams and its own report groups,
+    both named after the project.'
+  expiration: '2027-05-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations
+  - uc-business-operations-knowledge
+  - uc-business-operations-runtime
+  applies_to:
+  - Resource::*
+  star_actions:
+  - xray:PutTraceSegments
+  - xray:PutTelemetryRecords
+  - ecr:GetAuthorizationToken
+  - cloudwatch:PutMetricData
+  reason: 'Actions with no resource-level permission: X-Ray trace writes, the ECR auth token (the image
+    pull is on the repository), and CloudWatch metric writes, which carry a cloudwatch:namespace condition
+    wherever they appear. Only applied to a policy whose Resource-* statements grant nothing else.'
+  expiration: '2027-05-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations
+  - uc-business-operations-console
+  - uc-business-operations-runtime
+  resources:
+  - LogRetention*
+  - CustomCDKBucketDeployment*
+  applies_to:
+  - Resource::*
+  star_actions:
+  - logs:PutRetentionPolicy
+  - logs:DeleteRetentionPolicy
+  - cloudfront:CreateInvalidation
+  - cloudfront:GetInvalidation
+  reason: 'CDK-owned singleton roles: LogRetention sets retention on log groups, BucketDeployment invalidates
+    the console''s CloudFront cache. Neither reads or writes data; the same two are accepted for checkov
+    (CKV_AWS_111) in .ash.yaml.'
+  expiration: '2027-05-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations-runtime
+  resources:
+  - RuntimeRoleDefaultPolicy*
+  applies_to:
+  - Resource::*
+  - Resource::arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*
+  - Resource::arn:aws:bedrock:*:*:inference-profile/*
+  - Resource::arn:aws:bedrock:*::foundation-model/*
+  - Resource::arn:aws:ssm:*:*:parameter/*
+  - Resource::arn:<AWS::Partition>:bedrock-agentcore:*:runtime/*
+  - Resource::arn:<AWS::Partition>:bedrock-agentcore:*:workload-identity-directory/default/workload-identity/*
+  - Resource::arn:<AWS::Partition>:secretsmanager:*:secret:bedrock-agentcore-identity!default/oauth2/*
+  star_actions:
+  - xray:PutTraceSegments
+  - xray:PutTelemetryRecords
+  - ecr:GetAuthorizationToken
+  - cloudwatch:PutMetricData
+  - bedrock-agentcore:InvokeGateway
+  - bedrock-agentcore:GetGateway
+  - bedrock-agentcore:ListGateways
+  - bedrock-agentcore:StartBrowserSession
+  - bedrock-agentcore:StopBrowserSession
+  - bedrock-agentcore:ConnectBrowserAutomationStream
+  - bedrock-agentcore:CreateEvent
+  - bedrock-agentcore:GetEvent
+  - bedrock-agentcore:ListEvents
+  - bedrock-agentcore:DeleteEvent
+  - bedrock-agentcore:ListSessions
+  reason: 'The AgentCore runtime role (stacks/runtime_stack.py). Each wildcard is a name prefix this deployment
+    owns: its runtimes, its workload identity, its token-vault secrets (Secrets Manager''s random suffix),
+    its SSM path, its runtime log groups; Amazon Bedrock models are any-Region because cross-Region inference
+    profiles route there. Memory events are partitioned by an actorId condition. Memory retrieval is on
+    this deployment''s Memory, under a namespace condition. Accepted: the AgentCoreAccess statement (Gateway,
+    browser) is still on Resource * until it is scoped to the gateway ARN.'
+  expiration: '2027-02-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations
+  resources:
+  - PackComposerServiceRoleDefaultPolicy*
+  - SopsFunctionServiceRoleDefaultPolicy*
+  applies_to:
+  - Resource::arn:<AWS::Partition>:bedrock:*:knowledge-base/*
+  reason: bedrock:StartIngestionJob / ListIngestionJobs, in this account and Region. The knowledge bases
+    are in the knowledge stack, which deploys after this one, so their ids are not known here; neither
+    action reads or returns indexed content.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-IAM5
+  stacks:
+  - uc-business-operations
+  resources:
+  - ExemplarBuilderServiceRoleDefaultPolicy*
+  applies_to:
+  - Resource::arn:<AWS::Partition>:bedrock:*::foundation-model/*
+  - Resource::arn:<AWS::Partition>:bedrock:*:inference-profile/*
+  - Resource::arn:<AWS::Partition>:ssm:*:parameter/*/agent-knowledge-*
+  reason: One named model, any Region because its cross-Region inference profile routes there; and this
+    use case's own agent-knowledge parameters by name prefix.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-SMG4
+  stacks:
+  - uc-business-operations
+  resources:
+  - M2MClientSecret*
+  - UseCaseClientSecret*
+  - DelegatingClientSecret*
+  reason: Each secret is a copy of a Cognito app client's secret (SecretString is the client's ClientSecret).
+    Cognito is the source of truth, so a Secrets Manager rotation would only desynchronize the copy; rotating
+    means replacing the app client.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-SMG4
+  stacks:
+  - uc-business-operations
+  resources:
+  - PackSeedProof*
+  reason: A random value only the pack composer and the deploy import invoker may read, which proves to
+    the composer that a pack import comes from the deploy. It authenticates nothing outside those two
+    roles and grants no access itself; a rotation mid-deploy would fail that deploy's pack import, and
+    replacing the secret (a stack change) rotates it.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-CFR4
+  stacks:
+  - uc-business-operations-console
+  resources:
+  - Distribution*
+  reason: The distribution uses the default *.cloudfront.net certificate, on which CloudFront does not
+    honour a minimum protocol version; the bar is set by the certificate an adopter's custom domain brings.
+    Viewers are redirected to HTTPS.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-S1
+  stacks:
+  - uc-business-operations
+  resources:
+  - Sops*
+  - Registry*
+  - Exemplars*
+  reason: 'Accepted, as checkov''s CKV_AWS_18 is in .ash.yaml: the buckets are private and IAM-only, and
+    Sops and Registry are versioned and write-restricted by an explicit-deny bucket policy; CloudTrail
+    S3 data events would be the production control.'
+  expiration: '2027-05-01'
+- rule: AwsSolutions-APIG2
+  stacks:
+  - uc-business-operations
+  resources:
+  - Api*
+  reason: Each handler checks its own input through the shared api_http layer (a malformed body or a wrongly
+    typed field is a 400, never a 500); a gateway request validator would need a model per route duplicating
+    openapi.yaml. The JWT authorizer runs before any handler.
+  expiration: '2027-05-01'
+- rule: AwsSolutions-CB4
+  stacks:
+  - uc-business-operations-runtime
+  resources:
+  - Build*
+  reason: 'The project has no artifacts (NO_ARTIFACTS): its only output is the image it pushes to ECR,
+    which encrypts at rest. Its logs go to CloudWatch, outside this key''s scope.'
+  expiration: '2027-05-01'

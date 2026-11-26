@@ -1,0 +1,4080 @@
+# The REST contract of the business-operations use case. tests/test_business_operations_api.py fails when a route here and a
+# route the stack mounts disagree.
+openapi: 3.0.3
+info:
+  title: Business Operations — case, run and ticket API
+  version: 2.0.0
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  description: 'The REST surface of the business-operations use case: two API Gateway stages, one per
+
+    thing an adopter changes on its own. 2.0.0 because `GET /cases` pages.
+
+
+    **Who gets in.** Every route except `POST /erp-events` takes the **id token** of the
+
+    use case''s console client on the platform''s user pool (`use-cases/business-operations/
+
+    console-client-id`). A token from any other client on that pool is refused (403 `Token was
+
+    not issued for this application`), and so is a caller outside the
+
+    `business-operations-users` group (403 `Not a Business Operations user`). `PUT /deployment/trigger-mode`
+
+    and `PUT /packs/{pack_id}/trigger-mode` also need `business-operations-admins`. A pack''s own `entitlement` groups restrict on top.
+
+
+    **This is half the protocol.** A run is started here and observed on the run''s event
+
+    channel; `POST /runs` returns a run id and 202s immediately.
+
+
+    **A route whose dependency is not deployed answers 503** rather than accepting work
+
+    it cannot deliver.
+
+
+    **Errors** are `{"error": "…"}`, plus a `details` array on `PUT /packs/{pack_id}/controls`. A handler that
+
+    raises outside its own catch gets API Gateway''s `{"message": "Internal server error"}`.
+
+    '
+servers:
+- url: '{apiUrl}'
+  description: 'The console API, stage `prod`: SSM `use-cases/business-operations/api-url`. No trailing
+    slash.'
+  variables:
+    apiUrl:
+      default: https://example.execute-api.us-east-1.amazonaws.com/prod
+security:
+- bearerAuth: []
+tags:
+- name: runs
+  description: Starting and stopping agent runs. The half of the protocol that is REST.
+- name: cases
+  description: The work items an operator sees, and the traces of what the agent did to them.
+- name: tickets
+  description: 'SAMPLE ticketing: a stand-in for a real ITSM, on the console API. Replace it before
+    production (`api.sample_ticketing: false` removes these routes).'
+- name: config
+  description: Deployment settings an operator may change without a redeploy.
+- name: inbound
+  description: Unauthenticated ingress. Callers authenticate by other means, or not at all.
+paths:
+  /runs:
+    post:
+      tags:
+      - runs
+      operationId: startRun
+      summary: Start an agent run
+      description: '202s as soon as the run is handed off; the agent''s output goes to the events
+
+        channel, not to this response. Subscribe first — the channel has no replay.
+
+
+        A run is keyed by a case, or by a caller-supplied session when there is no case.
+
+        The channel it publishes to is `/runs/{case_id}` or `/runs/{session_id}`
+
+        accordingly, so a client knows what to subscribe to before it has a run id.
+
+
+        Only mounted when the agent invoker exists (`RunControlEnabled` in the stack
+
+        outputs).
+
+
+        `intent` decides whether the run may write. A conversation turn (`ask`, the
+
+        default) reads what any run may read and is given no tool that changes SAP, a
+
+        case or a ticket or sends mail; its run grant carries `ask`, so the Gateway run checks
+
+        refuse those tools too. Only `process`, Process on a case, may write.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - prompt
+              properties:
+                prompt:
+                  type: string
+                  maxLength: 32000
+                  description: 32000 *bytes* once encoded, not characters.
+                case_id:
+                  type: string
+                  description: The case to run on. Absent, this is a case-less conversation and `session_id`
+                    is required.
+                session_id:
+                  type: string
+                  description: Required when `case_id` is absent. Rejected if it is shorter than the runtime's
+                    minimum or starts with the prefix the runtime reserves for its own case sessions.
+                process_type:
+                  type: string
+                  description: Which skill to route to. Empty means let the router decide.
+                intent:
+                  type: string
+                  enum:
+                  - ask
+                  - process
+                  default: ask
+                  description: '`ask` is a question: on a case it needs only sight of the case''s pack,
+
+                    and the run writes nothing but its own trace, marked `intent: ask`. `process`
+
+                    runs the case''s SOP and may write within the run checks; it needs a `case_id` and
+
+                    the pack''s `approve_groups`. Never sent with `rehearse`.
+
+                    '
+                rehearse:
+                  type: boolean
+                  default: false
+                  description: 'Exercise a pack before it goes Live. Requires `process_type` — the pack
+
+                    is resolved from it, and may still be **incomplete**, so a pack no case can
+
+                    route to yet is reachable this way and no other. Refuses a `case_id`:
+
+                    a rehearsal is case-less, which is what makes it claim no `live_run`
+
+                    and write nothing back to any case row.
+
+
+                    Gated on **authoring** the resolved pack, not on seeing it — the
+
+                    `business-operations-authors` AND the pack''s `author_groups`.
+
+
+                    Every side-effecting tool is withheld from the run: no SAP write, no
+
+                    case-state update, no ticket, no notification. Its run grant carries
+
+                    `rehearsal`, so the Gateway run checks refuse those tools too.
+
+                    '
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '202':
+          description: Handed off. Watch the channel for what happens next.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - run_id
+                - session_id
+                properties:
+                  run_id:
+                    type: string
+                    format: uuid
+                    description: Every envelope on the channel carries this. A client following one slot
+                      may see another operator's run, so compare it.
+                  session_id:
+                    type: string
+                    description: The runtime session the run is on — the one supplied, or the one derived
+                      from the case.
+                  rehearsal:
+                    type: boolean
+                    description: Present and `true` only on a rehearsal.
+                  intent:
+                    type: string
+                    enum:
+                    - ask
+                    - process
+                    description: The intent the run started with, on every start but a rehearsal.
+        '400':
+          description: '`Invalid JSON body`, `prompt is required`, `prompt is too large`, `Invalid case_id`,
+            or `session_id is required when case_id is absent`. `intent` adds `intent must be "ask" or "process"`,
+            `Process needs a case_id` and `A rehearsal is not a process run`. Rehearsing adds `A rehearsal
+            runs no case`, `process_type is required to rehearse` and `No pack maps process_type <name>`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to this pack` — the case belongs to a pack this caller may not see,
+            or it is a case-less chat turn from a caller entitled to no pack at all. Refused before the
+            run is claimed, so an unentitled caller cannot mark the case busy or get their prompt written
+            into it. A `process` start by a caller who may see the case but is not a case worker
+            (`business-operations-case-workers`, then the pack''s `process_groups`) is refused `Only
+            this pack''s case workers may start the agent on its cases`, since the run checks pass the
+            run''s writes under the limit; asking needs only sight. A rehearsal is refused instead with `Not a pack author` (the deployment floor) or
+            `You may not rehearse <pack_id>` (the pack''s own grant), in that order.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`Case not found` — no such case to claim.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'A run already holds this case. Not a failure and not worth retrying: the case
+
+            is busy, and the run named here is the reason. Follow that id instead.
+
+
+            `run_id` is omitted when the losing write could not read the winning claim —
+
+            a run is in flight but this response cannot say which.
+
+
+            While an emergency stop stands, every start (Process, a question, the briefing, a
+
+            rehearsal) is refused `An emergency stop stands: … Nothing starts until an admin
+
+            clears it.` with `emergency_stop` (`EmergencyStopRefusal`) and claims nothing.
+
+
+            A `process` start on a settled case (`complete` or `sap_updated`) is refused
+
+            `This case is settled as <status>, so Process does not run on it again. Ask about
+
+            it instead.` with `status`, and claims nothing. An `ask` start on it still runs.
+
+            '
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - error
+                properties:
+                  error:
+                    type: string
+                    description: '`already_running`, or the refusal''s sentence.'
+                  run_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    description: The settled case's status, on a refused `process` start.
+        '500':
+          description: '`Internal error`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: '`Could not start run` — the claim was written and then rolled back, so the case
+            is not left permanently busy.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /runs/stop:
+    post:
+      tags:
+      - runs
+      operationId: stopRun
+      summary: Stop the run on a case or session
+      description: 'Best effort, and it says which: `stopped` is false when there was nothing to stop
+
+        or the runtime refused. Stopping does not retract what the agent already published.
+
+
+        Dispatched on the path alone — this route serves any verb as a stop and never
+
+        answers 405.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: One of the two is required.
+              properties:
+                case_id:
+                  type: string
+                session_id:
+                  type: string
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '202':
+          description: Accepted, with whether anything was actually stopped.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - stopped
+                properties:
+                  stopped:
+                    type: boolean
+        '400':
+          description: '`case_id or session_id is required`, or `Invalid case_id`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`Case not found` — checked before the 403, so an unentitled caller who guesses
+            a case id learns nothing from the difference.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to this pack` — the same floor as POST /runs. Stopping a run on
+            a case the caller cannot see would be a denial of service on someone else''s work.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`Internal error`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cases:
+    get:
+      tags:
+      - cases
+      operationId: listCases
+      summary: List one view of the cases
+      description: 'One page of one view of the cases the caller may see, searched, filtered and ordered
+        here (`api/layer/python/case_query.py`), `{items, next_token, view, sort, order}`. Read through
+        the `pack-status-updated-index` (one query per pack and status in the view), then the page''s
+        cases by id. Ties sort by `case_id`, so a walk of every page repeats and skips nothing. A page
+        can be short, even empty, and still carry a `next_token`: a search stops after reading 1,000
+        index entries per pack and status and the next page resumes there. A caller entitled to no pack
+        is refused (403), never handed an empty list. Any parameter not listed here is a 400.
+
+
+        Each item is cut to what a list shows: `agent_traces` holds only the latest trace (with `traces_count`
+        beside it), `live_run` only its header (`run_id`, `trigger`, `started_at`, `updated_at`), and
+        `action_log` is omitted. `GET /cases/{case_id}` returns a case whole. `?key=` answers a bare array.'
+      parameters:
+      - name: view
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [needs_you, team, new, running, failed, done, all]
+          default: all
+        description: 'The statuses read, from `case_status.VIEWS`: `needs_you` awaiting_human_input and
+          manual_review_required in the packs whose `approve_groups` the caller is in (an empty page,
+          not a 403, for a `pack_id` they see but do not approve in); `team` the same statuses in every
+          pack the caller sees, whoever may decide; `new` detected; `running` processing; `failed` error; `done` complete
+          and sap_updated; `all` every status.'
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+        description: A case matches when its `document_number`, its party value or its `case_id` starts
+          with this, ignoring case. The party value is the pack's first `string` field that is not a reason,
+          not hidden from the panel and not a currency field (`supplier_number` in `finance_ops`).
+      - name: exception_type
+        in: query
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            pattern: ^[a-z][a-z0-9_]{0,63}$
+        description: Repeatable. Matches the case's `exception_type`, or its `process_type` while the agent
+          has identified none.
+      - name: pack_id
+        in: query
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            pattern: ^[a-z][a-z0-9_]{0,63}$
+        description: Repeatable. Narrows to these packs; one this caller is not entitled to is refused
+          (403), not answered with an empty list. Default every pack the caller may see.
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [updated_at, amount]
+          default: updated_at
+        description: '`amount` is the pack''s first `amount` field, read from `pack-status-amount-index`
+          page by page as the time order is; a case with no amount, or one that is not a number,
+          sorts below every amount (last descending, first ascending). It needs the request to
+          cover exactly one pack.'
+      - name: order
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [asc, desc]
+        description: Default `asc` for needs_you, team, new, running and failed; `desc` for done and all.
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+        description: '`<pack_id>:<json>` — the case whose natural key is exactly this, e.g. `finance_ops:{"SupplierInvoice":"5100001976","FiscalYear":"2026"}`
+          (URL-encoded). For a caller that knows what the case is in SAP but not the `case_id` minted
+          from it, which is a digest: the id is derived from the key and read directly. Answers a 0-or-1
+          array, so "no such case" reads differently from "not entitled" (403). Takes no other parameter.'
+      - in: query
+        name: limit
+        required: false
+        description: Page size, 1-200. Default 50.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+      - in: query
+        name: next_token
+        required: false
+        description: The previous page's `next_token`, as given, with the same other parameters. It carries
+          only where that page ended and a digest of its parameters; the packs read always come from the
+          caller's entitlement and `pack_id`.
+        schema:
+          type: string
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: One page. `next_token` is null when nothing is left.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - items
+                - next_token
+                - view
+                - sort
+                - order
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Case'
+                  next_token:
+                    type: string
+                    nullable: true
+                  view:
+                    type: string
+                  sort:
+                    type: string
+                  order:
+                    type: string
+        '400':
+          description: 'A parameter is refused, named in `field`: an unknown one, a value outside its
+            allowed set or length, a `next_token` this API did not issue for these parameters, or
+            `sort=amount` over more than one pack.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FieldError'
+        '403':
+          description: '`Not entitled to this pack` — either an unentitled `pack_id`, or none at all from
+            a caller entitled to none. Never an empty list: that would assert the pack holds no cases,
+            which is a claim about someone else''s data.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`Internal server error` — stable text, details in logs only.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cases/counts:
+    get:
+      tags:
+      - cases
+      operationId: countCases
+      summary: Count cases per view, pack and status
+      description: 'How many cases each view holds under the same filters as `GET /cases`, `{views: {view:
+        n}, counts: {pack_id: {status: n}}}`; a status with none is omitted from `counts`. Without `q`
+        or `exception_type`, one count query per pack and status on the `pack-status-updated-index`,
+        so a poll that only needs numbers (the console heartbeat) never reads a case; with one, the
+        same index entries read and matched. Floored like `GET /cases`.'
+      parameters:
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+        description: As `GET /cases`.
+      - name: exception_type
+        in: query
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+        description: As `GET /cases`.
+      - name: pack_id
+        in: query
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+        description: As `GET /cases`; an unentitled pack is refused (403).
+      - name: by
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [exception_type]
+        description: 'Also count each view by exception type (`exception_types`): the case''s
+          `exception_type`, or its `process_type` while none is identified, under `q` and `pack_id` but
+          not `exception_type`, so a facet shows what each choice would. The entries are then read and
+          counted in the function (projected to the types), not counted by DynamoDB: the same read
+          units, more transfer. Opt-in, so the heartbeat stays a count.'
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: The counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - views
+                - counts
+                properties:
+                  exception_types:
+                    type: object
+                    description: 'With `by=exception_type` only. `{view: {type: n}}`, a type with none omitted.'
+                    additionalProperties:
+                      type: object
+                      additionalProperties:
+                        type: integer
+                  views:
+                    type: object
+                    description: One count per view. `needs_you` sums only the packs whose
+                      `approve_groups` the caller is in; every other view, and `counts`, every
+                      pack the caller sees.
+                    additionalProperties:
+                      type: integer
+                  counts:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      additionalProperties:
+                        type: integer
+        '400':
+          description: A parameter is refused, named in `field`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FieldError'
+        '403':
+          description: '`Not entitled to this pack`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cases/summary:
+    get:
+      tags:
+      - cases
+      operationId: summarizeClosedCases
+      summary: Summarize the cases closed since a time
+      description: 'What closed in the caller''s packs since `since`, in total and per UTC day (every
+        day from `since` to now, zeros included): how many, by `disposition` (`none` when a case has
+        none), the pack''s amount field summed per currency (`unknown` when a case carries none), and
+        the closed cases'' `cost_summary.total_cost_usd`. Closed is the `done` view (`complete`,
+        `sap_updated`) with `updated_at` at or after `since`. One query per pack and done status on the
+        `pack-status-updated-index`; no case is read whole. Floored like `GET /cases`.'
+      parameters:
+      - name: since
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+        description: An ISO 8601 time with a zone, at most 30 days ago and not in the future. Default
+          24 hours ago.
+      - name: pack_id
+        in: query
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+        description: As `GET /cases`; an unentitled pack is refused (403).
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: The summary.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - since
+                - until
+                - packs
+                - totals
+                - days
+                properties:
+                  since:
+                    type: string
+                  until:
+                    type: string
+                  packs:
+                    type: array
+                    items:
+                      type: string
+                  totals:
+                    $ref: '#/components/schemas/ClosedSummary'
+                  days:
+                    type: array
+                    items:
+                      allOf:
+                      - $ref: '#/components/schemas/ClosedSummary'
+                      - type: object
+                        required:
+                        - date
+                        properties:
+                          date:
+                            type: string
+                            format: date
+        '400':
+          description: A parameter is refused, named in `field`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FieldError'
+        '403':
+          description: '`Not entitled to this pack`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cases/{case_id}:
+    parameters:
+    - $ref: '#/components/parameters/CaseId'
+    get:
+      tags:
+      - cases
+      operationId: getCase
+      summary: Get one case
+      description: The stored item as-is, including its trace history and any `live_run` claim. A client
+        that joins a run mid-flight rebuilds the screen from this and then splices the channel's frames
+        onto it.
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: The case.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Case'
+        '400':
+          description: '`Invalid case_id`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to this pack` — resolved from the case''s stored pack, and returned
+            after the 404 so an unentitled caller who guesses a real case id learns nothing from the difference.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`Case not found`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cases/{case_id}/rating:
+    parameters:
+    - $ref: '#/components/parameters/CaseId'
+    put:
+      tags:
+      - cases
+      operationId: rateCase
+      summary: Rate the agent's work on a case
+      description: One rating per rater, keyed by the caller's `sub` from the token; rating
+        again replaces your own. Anyone who may see the case may rate it. The exemplar builder
+        ranks completed cases by net rating (raters up minus raters down) and never uses one
+        scored below zero as an exemplar or a precedent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - rating
+              properties:
+                rating:
+                  type: string
+                  enum:
+                  - positive
+                  - negative
+                comment:
+                  type: string
+                  description: Truncated to 5000 characters rather than rejected.
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - saved
+                - rating
+                - rater
+                properties:
+                  saved:
+                    type: boolean
+                    enum:
+                    - true
+                  rating:
+                    type: string
+                    enum:
+                    - positive
+                    - negative
+                  rater:
+                    type: object
+                    description: What was stored under `ratings.<sub>` on the case, plus the `sub`.
+                    required:
+                    - sub
+                    - rating
+                    - name
+                    - at
+                    properties:
+                      sub:
+                        type: string
+                      rating:
+                        type: string
+                        enum:
+                        - positive
+                        - negative
+                      name:
+                        type: string
+                        description: The caller's display claim, email first.
+                      at:
+                        type: string
+                        format: date-time
+                      comment:
+                        type: string
+                      author:
+                        type: boolean
+                        description: Present when the rater may author the case's pack, so a comment on a negative rating becomes a lesson.
+        '400':
+          description: A missing or unrecognised `rating`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to this pack` — a rating is a write to the case, so it carries the
+            same floor as reading it.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`Case not found`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cases/{case_id}/reply:
+    parameters:
+    - $ref: '#/components/parameters/CaseId'
+    post:
+      tags:
+      - cases
+      operationId: replyToCase
+      summary: Reply to a case, resuming the agent
+      description: Records the decision on the case's `action_log` (actor `sub`, display name, source,
+        and for an approval the sha256 of the latest proposed write as `approved_write`), then enqueues it
+        for the agent. The record is one conditional update, so a case that settled, or gained a trace,
+        since it was read answers 409 and nothing is queued. The sender comes from the caller's token and
+        the case from the path, never the body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - message
+              additionalProperties: false
+              properties:
+                message:
+                  type: string
+                  minLength: 1
+                  description: The operator's own words, queued verbatim. Truncated to 5000 characters
+                    rather than rejected.
+                decision:
+                  type: string
+                  enum:
+                  - approved
+                  - denied
+                  - replied
+                  default: replied
+                  description: 'Every decision is gated on the pack''s `approve_groups`, since each resumes
+                    a run the run checks let write under the pack''s limit, matching POST /tickets/{ticket_id}/action.
+                    On a case that offers `decision_options`, only `replied` is taken; choose with `option`.'
+                option:
+                  type: string
+                  pattern: ^[a-z][a-z0-9_]{0,39}$
+                  description: 'The id of one of the case''s `decision_options`, in place of `decision`. An
+                    option with a write records `human_approved` with that write as `approved_write`
+                    (and on the entry as `option_write`); one without records `human_chose` and approves
+                    no write. Recorded only while the case is parked on a person and still offers the set
+                    read.'
+      responses:
+        '200':
+          description: Enqueued for the agent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - enqueued
+                - case_id
+                properties:
+                  enqueued:
+                    type: boolean
+                    enum:
+                    - true
+                  case_id:
+                    type: string
+        '400':
+          description: 'A missing `message`, an unrecognised `decision`, or a malformed `case_id`. With
+            `field: option`: an `option` that is not an option id or comes with `decision`, or an approve
+            or deny on a case that offers options.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: '`Authenticated operator is required` — the token carried no claim naming the caller,
+            so the reply cannot be attributed. Matches POST /tickets/{ticket_id}/action.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to this pack` — the caller may not read this case''s pack at all.
+            A decision by a caller who *may* read it but is not in the pack''s `approve_groups` is refused
+            as `Not entitled to decide on this case`, matching POST /tickets/{ticket_id}/action: the two
+            bodies are distinguishable because the operator sees them, and only one of them means "find
+            an approver".'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: '`Case is already complete` (or `sap_updated`) — a settled case takes no further
+            decision. Mirrors POST /tickets/{ticket_id}/action, which has rejected exactly this for the
+            ticket-backed path all along. Also `This case offers no options; approve, deny or reply`,
+            `That option is not one the case offers now` with `options`, the ids it offers, and `You
+            already approved this change. A different approver must approve it too.` with
+            `awaiting_second_approver: true` for a repeat approval by the same person, which records
+            nothing. While an emergency stop stands, `An emergency stop stands: … Nothing starts until an admin clears it.` with `emergency_stop`, before anything is recorded.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`Case not found`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: '`message must be 5000 characters or fewer` — rejected rather than truncated: a
+            silently shortened reason is a worse audit record than a refused one.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`Service temporarily unavailable` when the registry cannot be validated, or `Agent
+            queue not configured` when this deployment has no agent queue.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cases/enqueue:
+    post:
+      tags:
+      - cases
+      operationId: enqueueCase
+      summary: Queue a case for autonomous processing
+      description: 'The 200 means queued, not processed. The caller''s identity travels with the
+
+        message — the acting human''s OIDC `sub`, resolved from the authorizer context —
+
+        so the run is attributed to them rather than to the runtime.
+
+
+        Floored by pack entitlement like every other case route: a case in a pack the
+
+        caller may not see is refused, not queued. Was an API Gateway → SQS integration
+
+        with no Lambda in between, which is exactly why it could not be floored.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - case_id
+              additionalProperties: false
+              properties:
+                case_id:
+                  type: string
+                  pattern: ^[A-Za-z0-9_]{1,64}-[A-Za-z0-9_]{1,32}$
+                  description: 'Bounded at the gateway as well as parsed by the handler: the case_key
+                    codec accepts a canonical id of any length, and this value is sent verbatim as the
+                    FIFO group id, which SQS caps at 128 characters.'
+      responses:
+        '200':
+          description: Queued. `case_id` is echoed in its canonical spelling.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enqueued:
+                    type: boolean
+                    enum:
+                    - true
+                  case_id:
+                    type: string
+        '400':
+          description: '`Invalid case_id` or `Invalid JSON body`. A body the gateway''s request model
+            rejects never reaches the handler and returns the gateway''s own shape instead.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to this pack`. Deliberately says nothing about which packs would
+            be allowed. A caller who may see the pack but is not a case worker
+            (`business-operations-case-workers`, then the pack''s `process_groups`) is refused `Only
+            this pack''s case workers may start the agent on its cases`: the run checks pass the run''s
+            writes under the limit.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: An emergency stop stands; nothing is queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmergencyStopRefusal'
+        '404':
+          description: '`Case not found`. Answered before the 403, as on every other case route — an unentitled
+            caller who guesses a real id learns it exists.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`Service temporarily unavailable` when the registry cannot be validated, or `Agent
+            queue not configured` when this deployment has no agent queue.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /deployment/settings:
+    get:
+      tags: [config]
+      operationId: getDeploymentSettings
+      summary: Read this stack's contacts and where the deployment runs
+      description: >-
+        The contacts SOPs cite as `{{CONTACT_<NAME>}}`: `defaults` from platform.yaml,
+        `overrides` written here, and `effective`, apart so the console can say what differs
+        from what was deployed. `deployment` is where the deployment runs, behind sign-in
+        and never in `aws-exports.json`.
+      responses:
+        "200":
+          description: The settings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contacts, deployment, access]
+                properties:
+                  last_stop:
+                    nullable: true
+                    description: The last `POST /deployment/stop`, or null before any.
+                    allOf: [{ $ref: "#/components/schemas/DeploymentStop" }]
+                  access:
+                    type: object
+                    required: [may_create_pack, may_edit_contacts]
+                    description: What the caller may do across the deployment, from the rules the write routes decide with (`pack_access.may_create_pack`, `pack_access.may_edit_contacts`).
+                    properties:
+                      may_create_pack: { type: boolean, description: "`POST /packs` passes its gates: the author floor, in a development stack." }
+                      may_edit_contacts: { type: boolean, description: "`PUT /deployment/settings` takes this caller's contacts: the author floor, in any stack." }
+                  contacts:
+                    type: object
+                    properties:
+                      defaults: { type: object, additionalProperties: { type: string } }
+                      overrides: { type: object, additionalProperties: { type: string } }
+                      effective:
+                        type: object
+                        description: Keyed `CONTACT_<KEY>`, as a SOP cites it.
+                        additionalProperties: { $ref: "#/components/schemas/EffectiveValue" }
+                  deployment:
+                    type: object
+                    required: [mode, promotion_role, promotion_only, sap_systems, non_production]
+                    properties:
+                      mode: { type: string, enum: [workshop, production], description: "The platform's `deployment.mode`." }
+                      promotion_role: { type: string, enum: [development, quality, production] }
+                      promotion_only: { type: boolean, description: "True outside development, where every pack and SOP write over HTTP is refused and a pack arrives only by an import. Here, after sign-in, and not in `aws-exports.json`." }
+                      sap_systems:
+                        type: array
+                        description: Every SAP system this use case reaches, sorted by name.
+                        items:
+                          type: object
+                          required: [name, system_role]
+                          properties:
+                            name: { type: string }
+                            system_role: { type: string, enum: [sandbox, development, quality, production] }
+                      non_production:
+                        type: boolean
+                        description: True when there is a system and every one is known and not `production`.
+        "403":
+          description: "`Not entitled to any pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+    put:
+      tags: [config]
+      operationId: updateDeploymentSettings
+      summary: Set this stack's contacts
+      description: >-
+        The authors floor. All or nothing: one invalid contact rejects the body. Null clears
+        an override back to platform.yaml's value. One DynamoDB transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contacts]
+              properties:
+                contacts:
+                  type: object
+                  additionalProperties: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated: { type: integer }
+                  updated_by: { type: string }
+        "400":
+          description: "`Invalid fields` with `details`, `contacts is required`, or `No valid fields provided`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not in the authors group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /deployment/trigger-mode:
+    get:
+      tags:
+      - config
+      operationId: getDeploymentTriggerMode
+      summary: Read the deployment's trigger mode and each pack's mode
+      description: Cannot fail. A null field means the deployment does not have that setting rather than
+        that the read failed. An unattended producer queues a case only when the deployment's trigger mode and
+        the case's pack both read `auto`; an unset pack mode is `manual`.
+      responses:
+        '200':
+          description: The current mode, and whether this deployment can run autonomously.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trigger-mode:
+                    type: string
+                    nullable: true
+                    enum:
+                    - auto
+                    - manual
+                    - null
+                  trigger-mode-last-changed-by:
+                    type: string
+                    nullable: true
+                    description: 'Who last flipped the mode, and when — `"<mode> set by <operator> at
+                      <ISO-8601>"`, resolved from the authorizer context rather than the request body.
+                      Null when no flip has been attributed: the mode was set by the deploy, or last
+                      changed before this field existed. Attribution only — any authenticated caller may
+                      flip the mode.'
+                    example: auto set by ap.manager@example.com at 2026-09-11T23:41:07+00:00
+                  autonomous-capable:
+                    type: boolean
+                    nullable: true
+                  packs:
+                    type: object
+                    nullable: true
+                    description: One entry per published pack the caller may see, as `GET /registry`
+                      scopes them. Null when the registry or the parameters could not be read.
+                    additionalProperties:
+                      type: object
+                      required: [trigger-mode, trigger-mode-last-changed-by, effective]
+                      properties:
+                        trigger-mode:
+                          type: string
+                          nullable: true
+                          enum: [auto, manual, null]
+                          description: The pack's stored mode; null when never set, which is `manual`.
+                        trigger-mode-last-changed-by:
+                          type: string
+                          nullable: true
+                          description: '`"<mode> set by <operator> at <ISO-8601>"`, as for the deployment''s trigger mode.'
+                        effective:
+                          type: string
+                          enum: [auto, manual]
+                          description: '`auto` only when this pack and the deployment''s trigger mode both
+                            read `auto` and `autonomous-capable` is true.'
+    put:
+      tags:
+      - config
+      operationId: setDeploymentTriggerMode
+      summary: Set the deployment's trigger mode
+      description: Needs `business-operations-admins` (403 `This needs a Business Operations
+        administrator` otherwise). Sets the trigger mode every pack's mode is gated on; one pack's
+        mode is `PUT /packs/{pack_id}/trigger-mode`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trigger-mode]
+              properties:
+                trigger-mode:
+                  type: string
+                  enum:
+                  - auto
+                  - manual
+      responses:
+        '200':
+          description: The mode now stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trigger-mode:
+                    type: string
+                    enum:
+                    - auto
+                    - manual
+        '400':
+          description: '`trigger-mode` is missing, or is neither `auto` nor `manual`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '409':
+          description: While an emergency stop stands, turning the mode to `auto` is refused and nothing is written; `manual` stays allowed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmergencyStopRefusal'
+        '405':
+          description: '`Method not allowed`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: 'API Gateway''s `{"message": "Internal server error"}`, not this API''s error shape.
+            The handler does not wrap its SSM calls, so their failures escape as an unhandled Lambda error.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayError'
+  /deployment/stop:
+    post:
+      tags: [config]
+      operationId: stopDeployment
+      summary: "Emergency stop: nothing starts, and every run under way is stopped, until cleared"
+      description: >-
+        Needs `business-operations-admins` (403 `This needs a Business Operations
+        administrator` otherwise). First the stop stands (`<own>/autonomy/emergency-stop`,
+        watched by the audit-change alert): every path that starts a run refuses until
+        `POST /deployment/stop/clear`. It pauses the agent queue's consumer, so queued work
+        waits on the queue (`queue_held`). Then it sets the deployment's trigger mode to `manual` (written every
+        time, so the audit-change alert fires), revokes every unexpired run grant so the
+        run checks refuse each run's next Gateway call, and for each run with a case stops its
+        runtime session, releases its `live_run` and parks the case at
+        `manual_review_required` when it reads `processing`. Each step runs whatever the one
+        before it managed; the answer says what each took. A SAP write that passed the run checks
+        before the grant was revoked is not undone. The stop is kept as `last_stop` on
+        `GET /deployment/settings`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+                  description: Why, on one line. Trimmed; no control characters.
+      responses:
+        "200":
+          description: The stop, as recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stop]
+                properties:
+                  stop: { $ref: "#/components/schemas/DeploymentStop" }
+        "400":
+          description: "`reason` missing, blank, over 500 characters or not on one line (`field: reason`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not in the admins group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /deployment/stop/clear:
+    post:
+      tags: [config]
+      operationId: clearDeploymentStop
+      summary: End the standing emergency stop
+      description: >-
+        Needs `business-operations-admins`. Writes the stop `stands: false` with who, when
+        and why (the audit-change alert fires) and resumes the agent queue's consumer.
+        The trigger mode stays `manual`, and nothing is started: a parked case is started again by a
+        person.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+                  description: Why, on one line. Trimmed; no control characters.
+      responses:
+        "200":
+          description: The last stop, now cleared.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stop]
+                properties:
+                  stop: { $ref: "#/components/schemas/DeploymentStop" }
+        "400":
+          description: "`reason` missing, blank, over 500 characters or not on one line (`field: reason`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not in the admins group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: "`No emergency stop stands`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: "`The emergency stop could not be cleared; it still stands`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: "`The emergency stop could not be read; nothing cleared`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /registry:
+    get:
+      tags:
+      - config
+      operationId: getRegistry
+      summary: Which use cases this deployment runs
+      description: 'The resolved use case corpus, scoped to what the caller is entitled to see. Served
+        from the published registry — one S3 object the pack publisher writes — so a pack
+        published a minute ago is here now, with no deployment of any kind.
+
+
+        Every field is declarative: a pack''s display name, the process types it can resolve, where its
+        cases come from, and the columns a case table renders. Read it instead of hard-coding a pack,
+        and a new use case needs no client change either.
+
+
+        Deliberately omits each pack''s agent instructions and its constants — `GET /config` owns the
+        constants, with their effective values and sources.'
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: The packs this caller may see. Empty if none, which is a valid answer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - packs
+                properties:
+                  packs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UseCasePack'
+        '405':
+          description: '`Method not allowed`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /sops/sync:
+    post:
+      tags: [sops]
+      operationId: syncSops
+      summary: Index everything uploaded since the last run
+      description: >-
+        Starts one Amazon Bedrock ingestion job for the whole data source. Rarely needed: every
+        write starts its own job, or queues one when a job is running. Amazon Bedrock allows one
+        job at a time, which is what the 409 is; a follow-up is queued then too.
+      responses:
+        "202":
+          description: Job started. Poll `GET /sops` for its status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SopIngestion" }
+        "403":
+          description: "`Not a SOP author`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: "`An ingestion job is already running`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: >-
+            `Service temporarily unavailable` when the registry cannot be validated, or when this deployment has no SOPs knowledge base to index into.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /packs:
+    post:
+      tags: [packs]
+      operationId: createPack
+      summary: Create a pack without a checkout
+      description: >-
+        A pack is created with two gates: a pack that does not exist yet declares no `entitlement`, so the
+        floor is the whole authorization — whoever this deployment already trusts to
+        author pack content may mint one. The body carries a *description of the use
+        case*, never pack keys: the server composes `pack_id`, `gateway_tools` (the read
+        set, and only the read set), `model_tier`, `process_type_to_sop`, `source` and
+        `fields` itself, so there is no field here that widens what the agent can reach.
+        The pack is born **incomplete** — every SAP value written as an
+        `<AWAITING_SURVEY>` marker — which makes it inert: the poller is never given it
+        and no `process_type` routes to it, so it cannot run until a SAP survey resolves
+        those markers from a checkout. Its constants are live, `rehearse` on `POST /runs`
+        exercises it with every side-effecting tool withheld, and its content and prompt
+        are editable here immediately.
+
+
+        In development the create is the pack's first version. Its SOPs are added per
+        process type with `PUT /packs/{pack_id}/sops/{process_type}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pack_id, create]
+              properties:
+                pack_id:
+                  type: string
+                  pattern: "^[a-z][a-z0-9_]*$"
+                  example: finance_ops
+                  description: >-
+                    The pack to write. For a patch it must already be published — an
+                    unknown one is a 404. For a `create` it must **not** be: an id already
+                    taken is a 409, because overwriting would replace the existing pack's
+                    `source`, `fields` and `gateway_tools` with markers and the read set.
+                create:
+                  type: object
+                  description: >-
+                    Present to mint a new pack. A create already writes the document and the prompt. A key this object does not declare is refused rather than
+                    ignored, so a submitter who tried to set `gateway_tools` is told it is
+                    not theirs to set.
+                  required:
+                    [
+                      display_name,
+                      description,
+                      short_id,
+                      kind,
+                      definition,
+                      process_types,
+                    ]
+                  additionalProperties: false
+                  properties:
+                    display_name:
+                      type: string
+                      maxLength: 2000
+                      example: Field Service Parts
+                    description:
+                      type: string
+                      maxLength: 2000
+                      example: Parts shortages that block a scheduled service call.
+                    short_id:
+                      type: string
+                      pattern: "^[a-z][a-z0-9]{1,7}$"
+                      example: fsp
+                      description: >-
+                        The prefix of every case id this pack mints. No two packs may claim
+                        the same one — a collision is a 400 naming the pack that holds it.
+                    kind:
+                      type: string
+                      enum: [filter, absence, aging]
+                      description: >-
+                        What makes a record an exception. The three the poller can execute;
+                        `event`, `comparison` and `derived` are authored from a checkout.
+                    definition:
+                      type: string
+                      maxLength: 2000
+                      description: >-
+                        What makes a record an exception, in the analyst's own words. It
+                        becomes the composed prompt's own framing and the text of the
+                        `source.filter` marker the survey resolves.
+                      example: A confirmed service order whose parts are not in stock.
+                    process_types:
+                      type: array
+                      minItems: 1
+                      maxItems: 50
+                      items: { type: string, pattern: "^[a-z][a-z0-9_]*$" }
+                      description: >-
+                        The situations this pack handles. Each gets a
+                        `process_type_to_sop` entry, so upload an SOP per name with
+                        `POST /sops`. Required, because `process_type_to_sop` is privileged
+                        — a pack created without one could never be given one over HTTP.
+                      example: [parts_shortage]
+                    attributes:
+                      type: array
+                      maxItems: 100
+                      description: >-
+                        What each case carries, and how it renders. **Worth filling in
+                        now:** `fields` and `field_map` are privileged, so an attribute
+                        omitted here is a checkout change later. Each SAP path is written as
+                        a marker for the survey to resolve.
+                      items:
+                        type: object
+                        required: [name, label, type]
+                        additionalProperties: false
+                        properties:
+                          name:
+                            type: string
+                            pattern: "^[a-z][a-z0-9_]*$"
+                            description: >-
+                              May not shadow a `WorkItem` property — it is written into the
+                              case's open `attributes` map, so the platform's own column of
+                              that name is what a reader would lose.
+                          label: { type: string, maxLength: 2000 }
+                          type:
+                            type: string
+                            enum: [string, date, amount, decimal]
+                          currency_field:
+                            type: string
+                            description: >-
+                              Required for `amount` and read for nothing else. Must name
+                              another attribute this spec declares.
+                          panel:
+                            type: boolean
+                            description: >-
+                              false hides the field from the case detail panel while
+                              leaving it available to the agent.
+                    constants:
+                      type: object
+                      additionalProperties: { type: number }
+                      description: >-
+                        The pack's thresholds, checked against the same ranges every
+                        write path enforces.
+                      example: { MIN_STOCK_PCT: 20 }
+                    older_than_days:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        Required for `kind: aging` and refused for any other kind.
+      responses:
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+        "201":
+          description: >-
+            Applied and republished. In development a patch answers with the import that
+            made the version (`result`, `version`, `import_id`, `from`, `to`, `diff`), and
+            a create with the registry summary below plus `version`; elsewhere a patch
+            answers with the registry summary.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: integer
+                    description: The pack version the write made. Development only.
+                  schema:
+                    type: string
+                    example: usecase-registry/1
+                    description: >-
+                      The registry artifact's schema identifier — a string, not a number.
+                      A reader that does not speak it treats the corpus as empty.
+                  packs: { type: integer, description: How many packs the republished corpus holds. }
+                  bytes: { type: integer, description: Size of the registry object written. }
+                  written:
+                    type: array
+                    items: { type: string }
+                    example: ["finance_ops/pack.json", "registry.json"]
+                  skipped:
+                    type: array
+                    items: { type: string }
+                    description: >-
+                      Packs the rebuild could not load and therefore left out of the
+                      published corpus. Normally empty; a name here is live for nobody
+                      until it is fixed and republished.
+                    example: []
+        "400":
+          description: >-
+            Malformed body, a patch naming no writable key, a patch spanning both tiers
+            (`One tier per request`), a privileged key, a `create` carrying a patch, or a
+            create spec whose `short_id` another published pack already claims.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: >-
+            `Not a pack author`, not entitled to that tier of that pack, or `Packs and
+            SOPs are not edited in <role>` outside a development stack.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No such published pack. A patch only — a create expects none.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >-
+            A create naming a `pack_id` that is already published here: overwriting would
+            replace the existing pack's `source`, `fields` and `gateway_tools` with markers
+            and the read set, so revise it with a patch instead. Or a patch whose
+            `expected_version` is not the pack's version any more (the body's `version` is
+            the one it is at), or another write held the composer through the route's
+            retries. Nothing was written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: >-
+            The patch applied but the pack could not be read back, so the rebuild would
+            have published a corpus missing it — every one of its process types would have
+            gone offline. Nothing was published and the corpus is unchanged.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: The composer failed. Nothing was published.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /packs/status:
+    get:
+      tags: [packs]
+      operationId: getPackStatus
+      summary: Each visible pack's live version, routing and last refused write
+      description: >-
+        What the console's Packs card shows, for every pack the caller may see (the
+        visibility `GET /registry` applies). Read from the records the pack composer keeps
+        in the registry bucket, never written. `ops.py pack status` shows the same and
+        more: the checkout's differences and SOP search, which
+        `GET /sops` serves as `search`.
+      responses:
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+        "200":
+          description: One row per visible pack.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [packs]
+                properties:
+                  packs:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        [pack_id, version, origin, marked, routes, unroutable, last_refusal]
+                      properties:
+                        pack_id: { type: string, example: finance_ops }
+                        version:
+                          type: integer
+                          nullable: true
+                          description: The active version; null before the first verb stores version 0.
+                        origin:
+                          type: object
+                          nullable: true
+                          description: The audit record that activated the version.
+                          properties:
+                            via:
+                              type: string
+                              description: "`seed`, `adopted`, `import`, `edit`, `create`, `export`, `rollback` or `retired`."
+                            at: { type: string, format: date-time }
+                            by:
+                              type: string
+                              nullable: true
+                              description: >-
+                                Who the composer's invoker named: the author of an edit
+                                or a create, the IAM caller of an import.
+                            change_ref: { type: string, nullable: true }
+                        marked:
+                          type: boolean
+                          description: Its source is still a survey marker, so nothing routes to it.
+                        routes:
+                          type: array
+                          items: { type: string }
+                          description: The process types that route to this pack now.
+                        unroutable:
+                          type: array
+                          items: { type: string }
+                          description: >-
+                            Why nothing routes to it, when the pack itself is the reason:
+                            each `source` field still carrying a survey marker
+                            (`marked at source.key[0].field`) and the SAP tools it names
+                            that this deployment does not serve
+                            (`tools unserved: odata_read`). Empty means it may route.
+                        last_refusal:
+                          type: object
+                          nullable: true
+                          description: >-
+                            The last write the composer refused for this pack: an applied
+                            import, rollback or retire, or a publish. A refusal the route
+                            answers before reaching the composer is not recorded.
+                          properties:
+                            at: { type: string, format: date-time }
+                            verb: { type: string, example: import }
+                            error: { type: string, description: The rule that refused it. }
+                            detail: { type: string, nullable: true }
+  /packs/{pack_id}:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+    get:
+      tags: [packs]
+      operationId: getPack
+      summary: The pack document, its version, and the part of each key
+      description: >-
+        For whoever may see the pack. `pack` is the document as the registry stores it.
+        `parts` names the pack part (`intake`, `procedures`, `controls`,
+        `agent_configuration`, `evaluations`) of each top-level key the document carries,
+        from `pack_tiers.PARTS`, which `access.edit` is also derived from, so the console
+        groups keys from the API. `constants` is Procedures; `constant_parts` names the
+        constants another part holds (the two write limits, Controls).
+      responses:
+        "200":
+          description: The pack.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, pack, parts, constant_parts, access]
+                properties:
+                  pack_id: { type: string }
+                  version: { type: integer, nullable: true }
+                  origin: { type: object, nullable: true }
+                  pack: { type: object }
+                  parts:
+                    type: object
+                    additionalProperties:
+                      type: string
+                      enum: [intake, procedures, controls, agent_configuration, evaluations]
+                  constant_parts:
+                    type: object
+                    additionalProperties:
+                      type: string
+                      enum: [intake, procedures, controls, agent_configuration, evaluations]
+                  access: { type: object, description: "As `GET /registry`'s." }
+        "403":
+          description: "`Not entitled to this pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+    patch:
+      tags: [packs]
+      operationId: patchPack
+      summary: Change a pack's content, its rule values or, in development, its structure
+      description: >-
+        The headless authoring path. A patch names keys, and the keys decide which
+        authority tier the request belongs to — a `tier` field in the body is ignored.
+        **Content** is what the agent says (`display_name`, `description`, `base_prompt`)
+        and the **value** of a constant the pack already declares — the numbers it
+        computes with. Declaring or removing a constant is structure, as are
+        `AUTO_WRITE_LIMIT_USD` and `DUAL_APPROVAL_LIMIT_USD` even for a value change,
+        because the run checks read them on every SAP write. Everything else a pack declares is
+        privileged and has no route outside a development stack: changing which Gateway
+        tools it holds, which model runs it or which SAP service it reads ships with the
+        use case's deploy, from a checkout, where the full validator runs.
+
+
+        Authorization is three gates: the deployment's authors group (the floor), then the
+        pack's own `entitlement.author_groups` for its content and
+        `entitlement.constant_groups` for a rule constant's value. A rule constant's value has no other
+        home: no stack overrides one. A patch naming a key its caller
+        may not write is refused whole rather than split, so a half-applied patch is never
+        a pack nobody authored.
+
+
+        **In a development stack every write is a version.** A patch is imported as the
+        pack's next version, and a create is its first, with the caller in the version's
+        provenance and audit record, so `ops.py bundle rollback` returns to any of them.
+        Send the version the content was read at (`GET /packs/{pack_id}/base_prompt` names
+        it) as `expected_version`, and a patch made after someone else saved the pack is a
+        409 rather than a silent overwrite. Only a development stack takes a patch or a
+        create: elsewhere either is a 403, because a pack arrives there only by `ops.py
+        bundle import` with a change reference.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pack:
+                  type: object
+                  description: >-
+                    A shallow patch over the pack document. May name only
+                    `display_name`/`description` (content) or `constants` — never both in
+                    one request, and never a privileged key.
+                  example: { display_name: "AP Exceptions" }
+                base_prompt:
+                  type: string
+                  description: >-
+                    A replacement `base_prompt.txt`. Content tier. Must contain both
+                    `{SOP_CONTENT}` and `{PLATFORM_MECHANICS}`, or the runtime silently
+                    drops that section.
+                expected_version:
+                  type: integer
+                  minimum: 0
+                  description: >-
+                    A patch only: the version the content was read at. In development, a
+                    patch made after someone else saved the pack is a 409, and nothing is
+                    written. Absent: no check.
+      responses:
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+        "200":
+          description: >-
+            Applied and republished. In development a patch answers with the import that
+            made the version (`result`, `version`, `import_id`, `from`, `to`, `diff`), and
+            elsewhere it answers with the registry summary.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: integer
+                    description: The pack version the write made. Development only.
+                  schema:
+                    type: string
+                    example: usecase-registry/1
+                    description: >-
+                      The registry artifact's schema identifier — a string, not a number.
+                      A reader that does not speak it treats the corpus as empty.
+                  packs: { type: integer, description: How many packs the republished corpus holds. }
+                  bytes: { type: integer, description: Size of the registry object written. }
+                  written:
+                    type: array
+                    items: { type: string }
+                    example: ["finance_ops/pack.json", "registry.json"]
+                  skipped:
+                    type: array
+                    items: { type: string }
+                    description: >-
+                      Packs the rebuild could not load and therefore left out of the
+                      published corpus. Normally empty; a name here is live for nobody
+                      until it is fixed and republished.
+                    example: []
+        "400":
+          description: >-
+            Malformed body, a patch naming no writable key, a patch spanning both tiers
+            (`One tier per request`), a privileged key, a `create` carrying a patch, or a
+            create spec whose `short_id` another published pack already claims.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: >-
+            `Not a pack author`, not entitled to that tier of that pack, or `Packs and
+            SOPs are not edited in <role>` outside a development stack.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No such published pack. A patch only — a create expects none.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >-
+            A create naming a `pack_id` that is already published here: overwriting would
+            replace the existing pack's `source`, `fields` and `gateway_tools` with markers
+            and the read set, so revise it with a patch instead. Or a patch whose
+            `expected_version` is not the pack's version any more (the body's `version` is
+            the one it is at), or another write held the composer through the route's
+            retries. Nothing was written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: >-
+            The patch applied but the pack could not be read back, so the rebuild would
+            have published a corpus missing it — every one of its process types would have
+            gone offline. Nothing was published and the corpus is unchanged.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: The composer failed. Nothing was published.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+
+  /packs/{pack_id}/sops:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+    get:
+      tags: [sops]
+      operationId: listPackSops
+      summary: The pack's SOPs, one row per process type
+      description: >-
+        One row per `process_type_to_sop` entry, with the part its SOP plays (the kinds
+        `GET /registry` reports), for whoever may see the pack. `can_author` is this caller's
+        verdict for the writes; `ingestion` and `search` are the SOP search's index state.
+      responses:
+        "200":
+          description: The SOPs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, sops, can_author]
+                properties:
+                  pack_id: { type: string }
+                  version: { type: integer, nullable: true }
+                  sops:
+                    type: array
+                    items:
+                      type: object
+                    properties:
+                      process_type: { type: string }
+                      kind: { type: string, enum: [triage, exception, shared, alias] }
+                      alias_of: { type: string }
+                      key: { type: string, example: finance_ops/price_variance.txt }
+                      size: { type: integer }
+                      last_modified: { type: string }
+                  ingestion: { $ref: "#/components/schemas/SopIngestion" }
+                  search: { type: object, nullable: true, additionalProperties: { type: string } }
+                  can_author: { type: boolean }
+        "404":
+          description: "`No published pack <pack_id>`, also for a pack the caller may not see."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+    post:
+      tags: [sops]
+      operationId: createPackSop
+      summary: Add a process type and its SOP, in one version
+      description: >-
+        A SOP file is always mapped. This writes the file (`name`, default
+        `<process_type>.txt`) and adds `process_type_to_sop[process_type]` beside it, as the
+        pack's next version. The authors floor, the pack's `author_groups` and, because a
+        mapping is structure, `business-operations-pack-admins`; development only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [process_type, content]
+              properties:
+                process_type: { type: string, pattern: "^[a-z][a-z0-9_]*$" }
+                name: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\\.(md|txt)$" }
+                content: { type: string }
+                expected_version: { type: integer }
+      responses:
+        "201":
+          description: Written, with its mapping.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string }
+                  version: { type: integer }
+                  bytes: { type: integer }
+                  uploaded_by: { type: string }
+        "400":
+          description: An unusable process type, name or text (an undeclared `{{SYMBOL}}` included).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not an author of the pack, not a pack-admin, or outside development.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: The process type is already mapped (replace its SOP with `PUT`), the file exists, or a stale `expected_version`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /packs/{pack_id}/sops/{process_type}:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+      - name: process_type
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]*$" }
+    get:
+      tags: [sops]
+      operationId: getPackSop
+      summary: One SOP's text, by a process type that maps it
+      description: >-
+        An alias reads the file it aliases. `pack_version` is what an edit names as
+        `expected_version`.
+      responses:
+        "200":
+          description: The SOP.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, content]
+                properties:
+                  key: { type: string }
+                  content: { type: string }
+                  size: { type: integer }
+                  last_modified: { type: string }
+                  version_id: { type: string, nullable: true }
+                  pack_version: { type: integer, nullable: true }
+                  uploaded_by: { type: string, nullable: true }
+                  process_type: { type: string }
+                  kind: { type: string, enum: [triage, exception, shared, alias] }
+                  alias_of: { type: string }
+                  can_author: { type: boolean }
+        "404":
+          description: The pack maps no such process type, or the caller may not see the pack.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    put:
+      tags: [sops]
+      operationId: putPackSop
+      summary: Replace the SOP a process type maps
+      description: >-
+        The authors floor and the pack's `author_groups`, in development; the pack's next
+        version. An alias is refused with 409 naming the process type that owns the file.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+                expected_version: { type: integer }
+      responses:
+        "200":
+          description: Written.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string }
+                  version: { type: integer }
+                  bytes: { type: integer }
+                  uploaded_by: { type: string }
+        "400":
+          description: An unusable text.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not an author of the pack, or outside development.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: The pack maps no such process type.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: An alias, or a stale `expected_version`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [sops]
+      operationId: deletePackSop
+      summary: Remove the SOP and every process type mapping to it, in one version
+      description: >-
+        Removes the file, every process type that maps it and its `shared_sops` entry. The
+        authors floor, the pack's `author_groups` and `business-operations-pack-admins`, in
+        development. The triage SOP and an alias are refused with 409.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expected_version: { type: integer }
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string }
+                  version: { type: integer }
+                  deleted_by: { type: string }
+        "403":
+          description: Not an author of the pack, not a pack-admin, or outside development.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: The pack maps no such process type.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: The triage SOP, an alias, or a stale `expected_version`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /packs/{pack_id}/sops/{process_type}/check:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+      - name: process_type
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]*$" }
+    post:
+      tags: [sops]
+      operationId: checkPackSop
+      summary: Lint a SOP's text without saving it
+      description: >-
+        Every refusal a write would give, given the same way, then the lint's findings. For
+        a process type not mapped yet, it checks the file a create would write
+        (`<process_type>.txt`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        "200":
+          description: The findings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, ok, findings]
+                properties:
+                  key: { type: string }
+                  ok: { type: boolean }
+                  findings: { type: array, items: { type: string } }
+        "400":
+          description: A text a write would refuse.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Outside development.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /packs/{pack_id}/rules:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+    get:
+      tags: [packs]
+      operationId: getPackRules
+      summary: The pack's rule values, effective here
+      description: >-
+        Every constant the pack declares but the two write limits, with its kind, source and
+        the write guards that read it (`guarded_by`). A rule's value is pack content, set with
+        `PATCH /packs/{pack_id}` (`pack.constants`); no stack overrides one.
+      responses:
+        "200":
+          description: The rules.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, rules, bounds, may_edit]
+                properties:
+                  pack_id: { type: string }
+                  version: { type: integer, nullable: true }
+                  rules: { type: object, additionalProperties: { $ref: "#/components/schemas/EffectiveValue" } }
+                  bounds:
+                    type: object
+                    additionalProperties: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+                  may_edit: { type: boolean, description: "`access.edit.rule_values`." }
+        "403":
+          description: "`Not entitled to this pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+
+  /packs/{pack_id}/controls:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+    get:
+      tags: [packs]
+      operationId: getPackControls
+      summary: The pack's limits, approvers and write checks
+      description: >-
+        `limits` are `AUTO_WRITE_LIMIT_USD` and `DUAL_APPROVAL_LIMIT_USD` effective here,
+        each with the pack's `ceiling`. The rest are pack structure, as published, changed
+        with `PATCH /packs/{pack_id}` in development.
+      responses:
+        "200":
+          description: The controls.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, limits, bounds, may_lower]
+                properties:
+                  pack_id: { type: string }
+                  limits:
+                    type: object
+                    additionalProperties:
+                      allOf:
+                        - $ref: "#/components/schemas/EffectiveValue"
+                        - type: object
+                          properties:
+                            ceiling: { type: number }
+                  bounds:
+                    type: object
+                    additionalProperties: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+                  entitlement: { type: object, nullable: true }
+                  write_guards: { type: array, nullable: true, items: {} }
+                  verifier: { type: object, nullable: true }
+                  write_amount_field: { type: string, nullable: true }
+                  write_limit_waiver: { nullable: true }
+                  may_lower: { type: boolean, description: "`access.lower_limits`." }
+        "403":
+          description: "`Not entitled to this pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+    put:
+      tags: [packs]
+      operationId: lowerPackLimits
+      summary: Lower, or clear, this stack's override of a write limit
+      description: >-
+        Any stack. `business-operations-limit-owners` and the pack's
+        `entitlement.limit_groups` where it sets them. A value above the pack's ceiling is refused, and so is a rule symbol, whose value is set with
+        `PATCH /packs/{pack_id}`. Null clears the override. All or nothing, one transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [limits]
+              properties:
+                limits:
+                  type: object
+                  additionalProperties: { type: number, nullable: true }
+      responses:
+        "200":
+          description: Applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated: { type: integer }
+                  updated_by: { type: string }
+        "400":
+          description: "`Invalid fields` with `details`, or `limits is required`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not in the limit owners group, or not in the pack's `limit_groups`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /packs/{pack_id}/trigger-mode:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+    get:
+      tags: [config]
+      operationId: getPackTriggerMode
+      summary: Read one pack's mode
+      description: >-
+        For whoever may see the pack. An unattended producer queues one of its cases only
+        when this mode and the deployment's trigger mode both read `auto`; an unset mode is
+        `manual`.
+      responses:
+        "200":
+          description: The pack's mode.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, trigger-mode, effective]
+                properties:
+                  pack_id: { type: string }
+                  trigger-mode: { type: string, nullable: true, enum: [auto, manual, null] }
+                  trigger-mode-last-changed-by: { type: string, nullable: true }
+                  effective: { type: string, enum: [auto, manual] }
+                  deployment:
+                    type: string
+                    nullable: true
+                    enum: [auto, manual, null]
+                    description: The deployment's trigger mode.
+        "403":
+          description: "`Not entitled to this pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+    put:
+      tags: [config]
+      operationId: setPackTriggerMode
+      summary: Set one pack's mode
+      description: >-
+        Needs `business-operations-admins`. Each flip is recorded on the mode parameter's
+        history and in `trigger-mode-last-changed-by`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trigger-mode]
+              properties:
+                trigger-mode: { type: string, enum: [auto, manual] }
+      responses:
+        "200":
+          description: The mode now stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pack_id: { type: string }
+                  trigger-mode: { type: string, enum: [auto, manual] }
+        "400":
+          description: "`trigger-mode` must be `auto` or `manual`, or `pack_id` is not a pack id."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not an administrator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: While an emergency stop stands, turning the mode to `auto` is refused and nothing is written; `manual` stays allowed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmergencyStopRefusal'
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /packs/{pack_id}/base_prompt:
+    get:
+      tags: [packs]
+      operationId: getPackBasePrompt
+      summary: Read the prompt a content-tier patch would replace
+      description: >-
+        The read half of `PATCH /packs/{pack_id}`'s content tier. `GET /registry` omits
+        `base_prompt` for everyone — it is the agent's own instructions, not UI data — so
+        without this route the only headless revision was a blind overwrite.
+
+
+        Gated on the write grant: the deployment's authors group (the floor), then the
+        pack's own `entitlement.author_groups`. Nothing tighter would buy anything, since a
+        caller who may replace the prompt can already read it back by replacing it.
+
+
+        Served from the registry bucket rather than the cached registry, so the text is
+        always what a patch sent now would replace.
+      parameters:
+        - name: pack_id
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9_]*$" }
+          example: finance_ops
+      responses:
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+        "200":
+          description: The pack's published prompt.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, base_prompt]
+                properties:
+                  pack_id: { type: string, example: finance_ops }
+                  version:
+                    type: integer
+                    nullable: true
+                    description: >-
+                      The pack's active version as read: send it back as a patch's
+                      `expected_version`.
+                  base_prompt:
+                    type: string
+                    description: >-
+                      Verbatim `base_prompt.txt`, placeholders unexpanded — `{SOP_CONTENT}`
+                      and `{PLATFORM_MECHANICS}` are still literal, and a replacement must
+                      keep both.
+        "400":
+          description: "`pack_id` is not a pack id."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: "`Not a pack author`, or not entitled to author that pack's content."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: >-
+            No published prompt for that pack — either it is not published here, or it was
+            published without one.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /packs/{pack_id}/versions:
+    get:
+      tags: [packs]
+      operationId: listPackVersions
+      summary: List the pack's stored versions, newest first
+      description: >-
+        Every version the composer stores for the pack in this stack, newest first, a page at
+        a time: who made it and when, where it was minted and by which verb, the pack parts it
+        changed against the version before it (a changed `constants` split by symbol, so a
+        lowered limit is Controls), its raw `changes`, and how it became active here (`origin`,
+        from the audit record that activated it, null when none of the last 200 says). For
+        whoever may see the pack, in any stack; it writes nothing.
+      parameters:
+        - name: pack_id
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9_]*$" }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - name: next_token
+          in: query
+          required: false
+          schema: { type: string }
+          description: The previous page's, as given. It carries only the version the page starts below.
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, active, versions, next_token]
+                properties:
+                  pack_id: { type: string }
+                  active: { type: integer, nullable: true }
+                  versions:
+                    type: array
+                    items: { $ref: "#/components/schemas/PackVersion" }
+                  next_token: { type: string, nullable: true }
+        "400":
+          description: A parameter is refused, named in `field`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FieldError" }
+        "403":
+          description: "`Not entitled to this pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /packs/{pack_id}/versions/{version}:
+    get:
+      tags: [packs]
+      operationId: getPackVersion
+      summary: Read one stored version's document
+      description: >-
+        One stored version: its `GET /packs/{pack_id}/versions` entry, `previous`, and its
+        content as sealed (`pack`, `base_prompt`, `sops` by file name, `evals`). Same gate.
+      parameters:
+        - name: pack_id
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9_]*$" }
+        - name: version
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: The version.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PackVersion"
+                  - type: object
+                    properties:
+                      pack_id: { type: string }
+                      previous: { type: object, nullable: true }
+                      retired: { type: boolean }
+                      pack: { type: object }
+                      base_prompt: { type: string }
+                      sops: { type: object, additionalProperties: { type: string } }
+                      evals: { type: array, items: { type: object } }
+        "400":
+          description: "`version` is not a version number."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: "`Not entitled to this pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No published pack <pack_id>`, or `No <pack_id> v<n> is stored here`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /packs/{pack_id}/evaluations:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+    get:
+      tags: [packs]
+      operationId: getEvaluations
+      summary: The pack's example cases and its last published evaluation run
+      description: >-
+        For whoever may see the pack. `example_cases` are the active version's
+        `evals.json`, each with the tab it shows under (`group`: `behaviour`, `boundaries`
+        for a test id at the edge of a rule, `security` for a `red-team` case).
+        `last_run` is what `evals-run --publish` last recorded for the pack, or null.
+        `estimate_usd` prices a run of every case from the last run's cost per case
+        (0.20 USD a case before any). A run starts from the command line only, so
+        `may_run` is false and `run_refusal` names the command.
+      responses:
+        "200":
+          description: The Evaluations part.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, example_cases, estimate_usd, may_edit, may_run]
+                properties:
+                  pack_id: { type: string }
+                  version: { type: integer, nullable: true }
+                  example_cases:
+                    type: array
+                    items: { $ref: "#/components/schemas/ExampleCase" }
+                  last_run:
+                    type: object
+                    nullable: true
+                    properties:
+                      run_id: { type: string, example: 2026-11-13T10:02:11Z }
+                      recorded_at: { type: string }
+                      recorded_by: { type: string }
+                      pack_version: { type: integer, nullable: true }
+                      total: { type: integer }
+                      passed: { type: integer }
+                      failed: { type: integer }
+                      cost_usd: { type: number }
+                      judges:
+                        type: object
+                        description: Each judge's mean over the run.
+                        additionalProperties: { type: number }
+                      results:
+                        type: object
+                        description: Keyed by `test_id`.
+                        additionalProperties:
+                          type: object
+                          properties:
+                            passed: { type: boolean }
+                            failures: { type: array, items: { type: string } }
+                            warnings: { type: array, items: { type: string } }
+                            status: { type: string, nullable: true }
+                            cost_usd: { type: number, nullable: true }
+                            judges: { type: object, additionalProperties: { type: number } }
+                  estimate_usd: { type: number }
+                  may_edit: { type: boolean, description: "`access.edit.example_cases`." }
+                  may_run: { type: boolean }
+                  run_refusal: { type: string }
+        "400":
+          description: "`pack_id` is not a pack id."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: "`Not entitled to this pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+
+  /packs/{pack_id}/evaluations/{test_id}:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+      - name: test_id
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{2,79}$" }
+    put:
+      tags: [packs]
+      operationId: putExampleCase
+      summary: Add or replace one example case, as the pack's next version
+      description: >-
+        "Save as example case" from a rehearsal or a test data post. Written by
+        `pack_composer`, the one writer of packs, as the pack's next version, in
+        development only, for the authors floor and the pack's `author_groups`. A case of
+        the same `test_id` is replaced where it stands.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [case]
+              properties:
+                case: { $ref: "#/components/schemas/ExampleCase" }
+                expected_version: { type: integer }
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: integer }
+        "400":
+          description: "`Invalid example case` with `details`, or a `test_id` that is not one."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: "`Not a pack author`, outside development, or not the pack's author."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: The pack is not published here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: A stale `expected_version`, or another publish in progress.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [packs]
+      operationId: deleteExampleCase
+      summary: Remove one example case, as the pack's next version
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expected_version: { type: integer }
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: integer }
+        "403":
+          description: As `PUT`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`No example case <test_id> in <pack_id>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: As `PUT`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /packs/{pack_id}/test-data:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+    get:
+      tags: [test-data]
+      operationId: getTestData
+      summary: A pack's test data recipe, its expected outcomes, and what was posted
+      description: >-
+        Mounted only with `test_data.enabled`, which `deployment.mode: production`
+        refuses; elsewhere API Gateway answers for a path it does not have. Every
+        `/test-data` call needs an operator (`business-operations-admins`) who may see the
+        pack, and a pack with `seed.steps`.
+
+
+        `inputs`, `presets` and `steps` are the published pack's `seed`, with each preset's
+        expected outcome (`TestDataExpected`) and no step payloads. `may_post` is false,
+        with `refusal` saying why, when the pack's SAP system is not a `sandbox` the
+        seeder reaches; the page stays readable. `posts` are the seeder's records of this
+        pack's seeds, newest first, at most 50, each joined to the case it made.
+      responses:
+        "200":
+          description: The page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pack_id, may_post, steps, inputs, presets, posts]
+                properties:
+                  pack_id: { type: string }
+                  sap_system:
+                    type: object
+                    nullable: true
+                    properties:
+                      name: { type: string }
+                      system_role: { type: string, enum: [sandbox, development, quality, production] }
+                  may_post: { type: boolean }
+                  refusal: { type: string, nullable: true }
+                  label: { type: string, nullable: true }
+                  summary: { type: string, nullable: true }
+                  company_code: { type: string, nullable: true }
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        label: { type: string }
+                        service: { type: string }
+                        entity: { type: string }
+                        when: { type: string, description: The seed's expression that skips the step when false. }
+                  inputs:
+                    type: array
+                    description: "`seed.inputs`, as declared."
+                    items: { type: object }
+                  presets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        label: { type: string }
+                        values: { type: object }
+                        expected: { $ref: "#/components/schemas/TestDataExpected" }
+                  posts:
+                    type: array
+                    items: { $ref: "#/components/schemas/TestDataPost" }
+        "403":
+          description: "`Only an operator may use test data`, or `Not entitled to this pack`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`<pack_id> has no test data recipe (seed.steps)`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+    post:
+      tags: [test-data]
+      operationId: postTestData
+      summary: Post the pack's document chain to its sandbox, or copies of it
+      description: >-
+        Real SAP documents, posted by the seeder with the system's service account,
+        outside the Gateway and the run checks. This route posts nothing itself: it checks the
+        inputs against the seed's declaration and that the pack's system is a sandbox,
+        then hands each copy to the seeder asynchronously and with no retry. The seeder
+        records each post before its first SAP call; follow it on `GET`. `preset` is the
+        label the values started from, recorded and shown, and decides nothing. The caller
+        is recorded from the token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                inputs:
+                  type: object
+                  description: Values for the seed's declared inputs; the rest take their defaults.
+                preset: { type: string, maxLength: 200 }
+                copies: { type: integer, minimum: 1, maximum: 5, default: 1 }
+      responses:
+        "202":
+          description: Handed to the seeder.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [posts]
+                properties:
+                  posts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        post_id: { type: string }
+                        status: { type: string, enum: [posting] }
+        "400":
+          description: "`Invalid inputs` with `details`, `inputs must be an object`, or a `copies` out of range."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: As `GET`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: As `GET`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: "`Test data posts only to a sandbox: <why>`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+
+  /packs/{pack_id}/test-data/expectation:
+    parameters:
+      - $ref: "#/components/parameters/TestDataPackId"
+    post:
+      tags: [test-data]
+      operationId: getTestDataExpectation
+      summary: The expected outcome for typed values
+      description: >-
+        No SAP call. A blank `posting_date` is accepted, as the seeder reads SAP's open
+        period for it. `expected` is null for a pack with no checker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                inputs: { type: object }
+      responses:
+        "200":
+          description: The expectation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [expected]
+                properties:
+                  expected: { $ref: "#/components/schemas/TestDataExpected" }
+        "400":
+          description: "`Invalid inputs` with `details`, or `inputs must be an object`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: As `GET /packs/{pack_id}/test-data`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: As `GET /packs/{pack_id}/test-data`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/RegistryUnavailable"
+
+  /tickets:
+    get:
+      tags:
+      - tickets
+      operationId: listTickets
+      summary: List approval tickets
+      description: 'Without `limit` or `next_token`, a bare array of every matching ticket, newest `updated_at`
+        first. With either, one page as `{items, next_token}`: follow `next_token` until it is null. A
+        page holds up to `limit` tickets and may hold fewer (or none) with more to come, since `assigned_to`
+        and the entitlement floor filter after the read; it is ordered within itself only. A `status`
+        filter is served from the status index rather than a table scan. The whole `/tickets` group is the
+        SAMPLE ticketing API (`api.sample_ticketing`).'
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: assigned_to
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        description: Page size; asks for the paged response. Default 100.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+      - name: next_token
+        in: query
+        required: false
+        description: Opaque cursor from the previous page; asks for the paged response. Only valid with
+          the same `status` it was issued under.
+        schema:
+          type: string
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: Every matching ticket, or one page of them.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - type: array
+                  items:
+                    $ref: '#/components/schemas/Ticket'
+                - type: object
+                  required:
+                  - items
+                  - next_token
+                  properties:
+                    items:
+                      type: array
+                      items:
+                        $ref: '#/components/schemas/Ticket'
+                    next_token:
+                      type: string
+                      nullable: true
+        '400':
+          description: '`limit must be an integer 1-500` or `Invalid next_token`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to decide on this case` — the caller is entitled to no pack, so
+            every ticket would be filtered out. Refused rather than returned as an empty list, for the
+            reason GET /cases gives.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '405':
+          description: '`Method not allowed`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`Internal server error` — stable text, details in logs only.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags:
+      - tickets
+      operationId: createTicket
+      summary: Open a ticket
+      description: An unrecognised `priority` silently becomes `medium`, and a `status` in the body is
+        ignored — a new ticket is always open. Read the returned ticket rather than assuming the request
+        was taken literally.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                case_id:
+                  type: string
+                title:
+                  type: string
+                description:
+                  type: string
+                priority:
+                  type: string
+                  enum:
+                  - low
+                  - medium
+                  - high
+                  - urgent
+                assigned_to:
+                  type: string
+              additionalProperties: true
+      responses:
+        '201':
+          description: The ticket as stored, including its generated `TKT-…` id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '500':
+          description: '`Internal server error` — stable text, details in logs only.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /tickets/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^TKT-[0-9A-F]{8}$
+    get:
+      tags:
+      - tickets
+      operationId: getTicket
+      summary: Get one ticket
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: The ticket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '403':
+          description: '`Not entitled to decide on this case` — the linked case belongs to a pack this
+            caller may not see. The pack is read from the cases table, never from the ticket.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`Ticket not found`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags:
+      - tickets
+      operationId: updateTicket
+      summary: Update a ticket
+      description: A body carrying only `comment` currently fails with a 500 rather than updating the
+        comment — the handler builds an empty attribute-name map and boto3 rejects it. Send `comment`
+        alongside a field that is updated, or through `POST /tickets/{id}/action`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                priority:
+                  type: string
+                  enum:
+                  - low
+                  - medium
+                  - high
+                  - urgent
+                assigned_to:
+                  type: string
+                comment:
+                  type: string
+      responses:
+        '503':
+          $ref: '#/components/responses/RegistryUnavailable'
+        '200':
+          description: The updated ticket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '400':
+          description: '`Invalid status: X` or `Invalid priority: X`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: '`Authenticated reviewer is required` — the token carried no identity to record
+            as the reviewer.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to decide on this case` — this status write reaches the same ProposedWrite
+            decision as the action route, so it carries the same gate: every decision needs the pack''s
+            `approve_groups`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`Ticket not found`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`Internal server error` — stable text, details in logs only.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /tickets/{id}/action:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^TKT-[0-9A-F]{8}$
+    post:
+      tags:
+      - tickets
+      operationId: actOnTicket
+      summary: Approve, deny or reply to a ticket, and resume the agent
+      description: 'The only route in this group that answers a wrapped envelope, because the action does
+        two things: it settles the ticket and it re-queues the case. `enqueued` says whether the second
+        happened. Only mounted when the agent resume queue exists.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: '`action`, or `option` in its place.'
+              properties:
+                action:
+                  type: string
+                  enum:
+                  - approved
+                  - denied
+                  - replied
+                  description: On a case that offers `decision_options`, only `replied` is taken.
+                option:
+                  type: string
+                  pattern: ^[a-z][a-z0-9_]{0,39}$
+                  description: 'The id of one of the linked case''s `decision_options`. The ticket takes
+                    `approved` for an option with a write and `denied` for one without, and records
+                    `option`; the case records the option as POST /cases/{case_id}/reply does.'
+                response_text:
+                  type: string
+                  description: Required for `replied`. Truncated to 5000 characters rather than rejected.
+                resolution:
+                  type: string
+                  description: 'The person''s words for the ticket''s resolution, beside `action` or `option`.
+                    Default `<Action> by reviewer`, or `Chose <option label>`. Truncated to 5000 characters.'
+                comment:
+                  type: string
+                  description: The comment added to the ticket. Default the resolution. Truncated to 5000 characters.
+      responses:
+        '200':
+          description: Settled, and the case re-queued if there was one to queue.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    $ref: '#/components/schemas/Ticket'
+                  enqueued:
+                    type: boolean
+                  case_id:
+                    type: string
+        '400':
+          description: 'An unrecognised `action`, or `replied` with no `response_text`. With `field:
+            option`: an `option` that is not an option id or comes with `action`, or an approve or deny
+            on a case that offers options.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: '`Authenticated reviewer is required`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`Not entitled to decide on this case` — every decision needs the pack''s `approve_groups`.
+            The pack is read from the cases table, never from the
+            ticket, which was written by an agent tool call and so cannot name its own authorization scope.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`Ticket not found`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 'The ticket is not in a state this action can be applied to — already settled, or
+            has no case to resume. Also the case''s option refusals, and `You already approved this
+            change. A different approver must approve it too.` with `awaiting_second_approver: true` for
+            a repeat approval by the same person, which records nothing on the case or the ticket. While an emergency stop stands, `An emergency stop stands: … Nothing starts until an admin clears it.` with `emergency_stop`, before anything is recorded.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`Internal server error` — stable text, details in logs only.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`Service temporarily unavailable` when the registry cannot be validated, or `Agent
+            resume queue is unavailable`; the ticket is not settled in either case.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /erp-events:
+    post:
+      tags:
+      - inbound
+      operationId: publishSapExceptions
+      summary: Exceptions SAP publishes itself, instead of waiting to be polled
+      description: 'SAP pushes exceptions here (`api.erp_events_endpoint`), on its own API. No
+        authorizer: the caller is an SM59 destination or a machine client, and the handler checks
+        either the shared token (`Authorization: Bearer <token>`, or Basic with the token as
+        password) or an access token of the use case''s ingest client with scope
+        `business-operations-ingest/send` (Cognito client credentials). Throttled to 50 RPS, burst
+        100. The body is checked as the ingest consumer checks it, then queued on the ingest queue
+        with `source` `sap.<the pack''s sap_system>`; the consumer makes the case. A failed enqueue
+        answers 500, so SAP resends; a resend creates nothing twice.'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - $ref: '#/components/schemas/SapEventEnvelope'
+              - $ref: '#/components/schemas/SapNudge'
+      responses:
+        '202':
+          description: Queued. The consumer makes the case, or nothing for a nudge on a key that is
+            not an exception in SAP.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - queued
+                properties:
+                  queued:
+                    type: string
+                    enum:
+                    - records
+                    - nudge
+        '400':
+          description: '`Malformed JSON`, `Undecodable body`, `Unknown pack_id: <pack_id>`, a pack on a
+            SAP system this route does not serve, or `Invalid message` with `reason`, the ingest
+            consumer''s: `shape` (the envelope forbids unknown keys, so a stray field lands here),
+            `version`, `system`, `keys`, `key-value`, `key-fields`, `records-not-accepted`,
+            `nudge-not-accepted`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: '`Invalid token`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: '`Payload too large` — the body exceeded 1 MB, or a nudge 16 KB (`Invalid
+            message`, reason `too-large`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`Could not queue the message; resend`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`Ingest not configured` — the secret holds no token, so the route fails closed;
+            or the pack registry could not be read.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      servers:
+      - url: '{ingestUrl}'
+        description: SSM `use-cases/business-operations/erp-events-url`, minus the path.
+        variables:
+          ingestUrl:
+            default: https://example.execute-api.us-east-1.amazonaws.com/prod
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: '`Authorization: Bearer <id token>`. Validated by a Cognito user pool authorizer, or
+        by a Lambda authorizer against the configured OIDC issuer — which one is a deploy time choice
+        and does not change what a client sends. The Lambda authorizer caches its decision **per token,
+        not per route**, for one minute — so one successful call pre-authorizes every route the token
+        is allowed on for that window, and a token revoked at the IdP keeps working until the cache expires
+        or the token does.'
+  responses:
+    RegistryUnavailable:
+      description: '`Service temporarily unavailable` — the published pack registry or explicit entitlement
+        override could not be validated. The API fails closed, returns no backend detail, and emits the
+        `RegistryUnavailable` operator alarm metric.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  parameters:
+    CaseId:
+      name: case_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Pattern-checked by the handler. `POST /cases/enqueue` documents the shape the gateway
+        enforces.
+    TestDataPackId:
+      name: pack_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^[a-z][a-z0-9_]*$
+      example: finance_ops
+  schemas:
+    ExampleCase:
+      type: object
+      description: 'One case of a pack''s `evals.json` (`api/layer/python/example_cases.py` is the
+        rule). `seed.inputs` are the pack''s seed inputs; `expected.outcome` is a key
+        `evals-run` grades.'
+      additionalProperties: false
+      required: [description, process_type, expected]
+      properties:
+        test_id: { type: string }
+        group: { type: string, enum: [behaviour, boundaries, security], description: Served, never stored. }
+        description: { type: string, maxLength: 2000 }
+        process_type: { type: string }
+        tags: { type: array, maxItems: 10, items: { type: string, maxLength: 200 } }
+        seed:
+          type: object
+          properties:
+            inputs: { type: object }
+            case_attributes: { type: object, additionalProperties: { type: string } }
+        payload: { type: object }
+        expected:
+          type: object
+          required: [outcome, reason]
+          properties:
+            outcome:
+              type: string
+              enum: [auto_release, approval_required, manual_review_required, refused]
+            reason: { type: string }
+            required_tool_calls: { type: array, maxItems: 30, items: { type: string } }
+            forbidden_tool_calls: { type: array, maxItems: 30, items: { type: string } }
+            sap_state: { type: object }
+            gateway: { type: object }
+            guardrail: { type: object }
+            guardrail_stop_ok: { type: boolean }
+    TestDataExpected:
+      type: object
+      nullable: true
+      description: 'What a seeded case should end as: the pack''s checker (`evals/oracle.py`) rule by
+        rule, then this stack''s effective limits. Null for a pack with no checker, never a guess.
+        `outcome` is null, with `sop.undecided` saying why, when the checker cannot decide.'
+      properties:
+        outcome:
+          type: string
+          nullable: true
+          enum: [auto_release, approval_required, manual_review_required]
+        label:
+          type: string
+          nullable: true
+          enum: ["Released, no person", Needs approval, Manual review]
+        approvers:
+          type: integer
+          description: 2 over `DUAL_APPROVAL_LIMIT_USD`, 1 for another approval, 0 otherwise.
+        exception_type:
+          type: string
+          nullable: true
+        sop:
+          type: object
+          properties:
+            outcome: { type: string, nullable: true }
+            undecided: { type: string }
+            checks:
+              type: array
+              items:
+                type: object
+                properties:
+                  rule: { type: string, example: price_variance 2.3 }
+                  label: { type: string }
+                  detail: { type: string }
+                  limit: { type: string }
+                  over: { type: boolean }
+        limits:
+          type: object
+          properties:
+            outcome: { type: string, nullable: true }
+            checks:
+              type: array
+              items:
+                type: object
+                properties:
+                  symbol: { type: string, enum: [AUTO_WRITE_LIMIT_USD, DUAL_APPROVAL_LIMIT_USD] }
+                  label: { type: string }
+                  amount: { type: number, nullable: true }
+                  currency: { type: string, nullable: true }
+                  limit: { type: number }
+                  over: { type: boolean }
+        checker: { type: string }
+    TestDataPost:
+      type: object
+      description: One seed, as the seeder recorded it, joined to the case it made.
+      properties:
+        post_id: { type: string, example: 2026-11-20T09:14:03Z#7c1d02aa }
+        posted_at: { type: string }
+        posted_by: { type: string }
+        preset: { type: string, nullable: true }
+        inputs: { type: object }
+        expected: { $ref: '#/components/schemas/TestDataExpected' }
+        status: { type: string, enum: [posting, posted, failed] }
+        error: { type: string, nullable: true }
+        documents:
+          type: object
+          nullable: true
+          description: The document numbers SAP created, as the seed's steps name them.
+        case_id: { type: string, nullable: true }
+        case:
+          type: object
+          nullable: true
+          description: Null until the poller or SAP's event has opened the case.
+          properties:
+            status: { type: string }
+            key: { type: object }
+        result:
+          type: string
+          nullable: true
+          enum: [as_expected, differs]
+          description: Graded as `evals-run` grades; null while the case has no outcome.
+    SopIngestion:
+      type: object
+      description: An Amazon Bedrock ingestion job. `POST /sops/sync` returns the first two fields;
+        `GET /sops` adds the rest for the most recent job.
+      required:
+      - job_id
+      - status
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          description: Amazon Bedrock's own, `STARTING`, `IN_PROGRESS`, `COMPLETE` or `FAILED`.
+        started_at:
+          type: string
+          format: date-time
+        documents:
+          type: integer
+          nullable: true
+          description: Documents scanned. Null until Amazon Bedrock reports statistics.
+    DeploymentStop:
+      type: object
+      required: [stopped_at, stopped_by, reason, stands]
+      properties:
+        stands: { type: boolean, description: "From the stop's own parameter, which every gate reads: true until cleared." }
+        queue_held: { type: boolean, description: The agent queue's consumer was paused. }
+        queue_resumed: { type: boolean, description: The clear resumed the consumer. }
+        cleared_at: { type: string, format: date-time, description: Absent while the stop stands. }
+        cleared_by: { type: string }
+        clear_reason: { type: string }
+        stopped_at: { type: string, format: date-time }
+        stopped_by: { type: string, description: "`<display> (<sub>)`, from the authorizer." }
+        reason: { type: string }
+        trigger_mode_set: { type: boolean, description: The deployment's trigger mode was written `manual`. }
+        runs_total: { type: integer, description: Every run whose grant was unexpired. }
+        runs:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [run_id, case_id, session_stopped, released, parked]
+            properties:
+              run_id: { type: string }
+              case_id: { type: string, nullable: true, description: Null for a run with no case. }
+              session_stopped: { type: boolean }
+              released: { type: boolean, description: "`live_run` was still this run's and is released." }
+              parked: { type: boolean, description: The case read `processing` and now reads `manual_review_required`. }
+        complete: { type: boolean, description: Every session stop was asked within the time budget. }
+    EmergencyStopRefusal:
+      type: object
+      required: [error, emergency_stop]
+      properties:
+        error: { type: string, description: "`An emergency stop stands: <reason> (<by>, <at>). Nothing starts until an admin clears it.`" }
+        emergency_stop:
+          type: object
+          required: [stands]
+          properties:
+            stands: { type: boolean }
+            stopped_at: { type: string, format: date-time }
+            stopped_by: { type: string }
+            reason: { type: string }
+    Error:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Sometimes a fixed string, sometimes raw exception text. Match on the fixed ones
+            documented per route; do not parse the rest.
+    PackVersion:
+      type: object
+      properties:
+        version: { type: integer }
+        sha256: { type: string }
+        made_by: { type: string, nullable: true }
+        made_at: { type: string, nullable: true }
+        made_in: { type: string, nullable: true, description: The stack that minted it. }
+        via: { type: string, description: "The verb that minted it: edit or create, else export (seed, import and adopt mint as an export)." }
+        change_note: { type: string, nullable: true }
+        door:
+          type: object
+          nullable: true
+          description: The people Gateway, when the edit came from a remote MCP client; null for the console or an import.
+          properties:
+            via: { type: string, enum: [people-gateway] }
+            client: { type: string, description: "The remote client: quick or copilot-studio." }
+            by: { type: string, description: The person's sub. }
+            display: { type: string, description: The person's username. }
+        parts:
+          type: array
+          items: { type: string, enum: [intake, procedures, controls, agent_configuration, evaluations] }
+        changes: { type: object }
+        origin:
+          type: object
+          nullable: true
+          properties:
+            via: { type: string }
+            by: { type: string, nullable: true }
+            at: { type: string, nullable: true }
+            change_ref: { type: string, nullable: true }
+            door: { type: object, nullable: true, description: As the version's door, from the audit record. }
+    ClosedSummary:
+      type: object
+      required:
+      - closed
+      - by_outcome
+      - value
+      - agent_cost_usd
+      properties:
+        closed:
+          type: integer
+        by_outcome:
+          type: object
+          additionalProperties:
+            type: object
+            required:
+            - cases
+            - value
+            properties:
+              cases:
+                type: integer
+              value:
+                type: object
+                additionalProperties:
+                  type: number
+        value:
+          type: object
+          description: The amount closed, per currency.
+          additionalProperties:
+            type: number
+        agent_cost_usd:
+          type: number
+    FieldError:
+      type: object
+      required:
+      - error
+      - field
+      properties:
+        error:
+          type: string
+        field:
+          type: string
+          description: The query parameter refused.
+    SapEventEnvelope:
+      type: object
+      required:
+      - pack_id
+      - timestamp
+      - records
+      additionalProperties: false
+      description: 'The contract handed to whoever writes the ABAP; the handler checks it by hand
+        (`pipeline/sap_ingest.py`, `envelope_error`; `types/sap-events.schema.json`), which also
+        takes an optional `version` (1) and `system`. It says nothing
+        about what is *inside* a record — those field names come from the `source.field_map` paths in
+        `packs/<pack_id>/pack.json`, which is the other half of the contract.'
+      properties:
+        pack_id:
+          type: string
+          description: 'Which use case pack this batch belongs to. Must equal the `pack_id` of a config
+            the deployment carries; anything else is a 400.'
+          example: finance_ops
+        timestamp:
+          type: string
+          description: 'ISO 8601 UTC instant at which SAP built the batch, not the document''s posting
+            date. Not checked against server time: no signature covers it, and a replay creates
+            nothing twice.'
+        records:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: Capped at 100 per call; the ABAP publisher splits a larger batch across calls.
+          items:
+            type: object
+            additionalProperties: true
+            description: One row of the pack's CDS exception view, serialized as-is. Keys match case-insensitively,
+              so the uppercase names an ABAP structure serializes to (`SUPPLIERINVOICE`) resolve against
+              the config's OData casing (`SupplierInvoice`). Item rows nest under the navigation property
+              the config's `iterate.path` names.
+    SapNudge:
+      type: object
+      required:
+      - pack_id
+      additionalProperties: false
+      description: 'Re-read this pack''s own query, narrowed to these keys (`types/sap-nudge.schema.json`).
+        Nothing in it becomes case data. At most 16 KB.'
+      properties:
+        version:
+          type: integer
+          enum:
+          - 1
+        pack_id:
+          type: string
+          example: finance_ops
+        system:
+          type: string
+          description: Must equal the pack's `sap_system`.
+        keys:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: The pack's parent key fields; none polls the whole pack now.
+          items:
+            type: object
+            additionalProperties:
+              type: string
+              pattern: ^[A-Za-z0-9._/-]{1,40}$
+    GatewayError:
+      type: object
+      description: API Gateway's own shape, and Powertools'. Reaches a client when a handler raises outside
+        its own error handling.
+      properties:
+        statusCode:
+          type: integer
+        message:
+          type: string
+    Case:
+      type: object
+      additionalProperties: true
+      description: Returned as stored, so it carries whatever the pollers and the agent wrote. `types/cases.schema.json`
+        is the authority, and generates both the Python and the TypeScript types the deployment uses.
+        Only the fields a client needs to follow a run are named here.
+      properties:
+        case_id:
+          type: string
+        key:
+          type: object
+          additionalProperties:
+            type: string
+          description: The case's natural key in the source system — SAP field name to value. What the
+            case is; `case_id` is only a digest of it, so this is what a client shows next to the id and
+            what `GET /cases?key=` takes back. Absent on cases written before ids were minted this way.
+        status:
+          type: string
+        pack_id:
+          type: string
+          description: Which use case pack owns this case.
+        updated_at:
+          type: string
+          format: date-time
+        attributes:
+          type: object
+          additionalProperties:
+            type:
+            - string
+            - number
+            - boolean
+            - 'null'
+          description: 'What the case''s pack knows about it that the platform does not — the values the
+            pack''s `field_map` pulled out of SAP, under the names that config chose. Open by design,
+            so an AP case carries `amount` and `supplier_number` where a material case carries `plant`:
+            read the keys the record has rather than the ones a pack is expected to have. Scalars only.
+            A case written before the columns moved in here still holds them as top-level fields in storage;
+            the read codec lifts them, so this is where they arrive either way.'
+        agent_traces:
+          type: array
+          description: One entry per completed run, oldest first.
+          items:
+            type: object
+            additionalProperties: true
+        live_run:
+          type: object
+          additionalProperties: true
+          description: The run currently holding this case, if any. A client rendering it should treat
+            a claim older than about a minute as stale — a run whose Lambda died leaves the claim behind.
+    Ticket:
+      type: object
+      additionalProperties: true
+      properties:
+        ticket_id:
+          type: string
+          pattern: ^TKT-[0-9A-F]{8}$
+        case_id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+        priority:
+          type: string
+          enum:
+          - low
+          - medium
+          - high
+          - urgent
+        assigned_to:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ConfigValues:
+      type: object
+      description: Two allowlisted groups. `contacts` maps a role to an email address; `constants` maps
+        a skill to its numeric thresholds. A null value clears an override.
+      properties:
+        contacts:
+          type: object
+          additionalProperties:
+            type: string
+            nullable: true
+        constants:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: number
+              nullable: true
+    EffectiveValue:
+      type: object
+      description: What a case resolves one `{{SYMBOL}}` to in this stack, and where it comes from.
+      required:
+      - value
+      - kind
+      - source
+      properties:
+        value:
+          oneOf:
+          - type: number
+          - type: string
+          nullable: true
+        kind:
+          type: string
+          enum:
+          - rule
+          - limit
+          - contact
+          description: '`rule`: the pack''s alone. `limit`: the pack''s ceiling, which a stack may only
+            lower. `contact`: the stack''s alone.'
+        source:
+          type: string
+          example: stack override (lowered from 100000)
+          description: '`pack v7` (`pack` before the pack has a version), `stack override (lowered from
+            <ceiling>)`, `platform.yaml` or `stack contact override`.'
+        cited_by:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: 'On a rule in `GET /packs/{pack_id}/rules` only: the process types whose SOP in
+            the active version names the symbol, sorted, an alias beside the type it aliases. Empty when
+            none does; null when the stack stores no active version yet. Read from the stored version,
+            once per version per function instance.'
+        guarded_by:
+          type: array
+          items:
+            type: string
+            enum:
+            - po_reference
+            - no_duplicate
+            - gr_coverage
+            - within_tolerance_or_approved
+          description: 'On a constant only, never a contact: the write guards the pack enables that
+            read this symbol before a payment-releasing SAP write, sorted. Empty when none does. A
+            rule with any is a control as well as a SOP value: changing it changes what the agent
+            may post without an approval.'
+    UseCasePack:
+      type: object
+      description: One use case, as `GET /registry` resolves it. The pack declares its identity and its
+        process types; its source declares where its cases come from and which SAP path each attribute
+        was read out of. Those are separate files in the repo, so that renaming a field in SAP is one
+        edit — this response is the join, done once server-side.
+      required:
+      - id
+      - display_name
+      - label
+      - process_types
+      - source
+      - fields
+      properties:
+        id:
+          type: string
+          description: The pack's directory name, and the `pack_id` its cases carry.
+        display_name:
+          type: string
+        description:
+          type: string
+        label:
+          type: string
+          description: What to call this pack's queue of cases, e.g. "Invoice Exceptions".
+        short_id:
+          type: string
+          description: The prefix every `case_id` from this pack starts with. Empty if it has no source.
+        process_types:
+          type: array
+          description: The classifications this pack has a SOP for, sorted.
+          items:
+            type: string
+        sops:
+          type: array
+          description: 'One row per `process_type_to_sop` entry, in declaration order, with the part
+            its SOP plays. Only `shared` is declared (the pack''s `shared_sops`); the rest follow from
+            the files: `triage` is `source.process_type.default`, an `alias` maps to the same file as
+            `alias_of`, and every other entry is an `exception` SOP.'
+          items:
+            type: object
+            required:
+            - process_type
+            - kind
+            - sop
+            properties:
+              process_type:
+                type: string
+              kind:
+                type: string
+                enum:
+                - triage
+                - exception
+                - shared
+                - alias
+              sop:
+                type: string
+                description: The SOP's key, `<pack_id>/<file>`.
+              alias_of:
+                type: string
+                description: Present only on an `alias`, naming the entry it stands for.
+        access:
+          type: object
+          description: 'What the signed-in caller may do in this pack, in this stack, computed by the
+            functions that gate each write (`api/layer/python/pack_access.py`). For badging and
+            disabling controls only: every route still decides for itself. Outside development every
+            `edit` key is false.'
+          required: [see, edit, lower_limits, set_trigger_mode, approve, process, rehearse]
+          properties:
+            see:
+              type: boolean
+            edit:
+              type: object
+              description: One answer per pack part, as `PATCH /packs/{pack_id}` and `PUT /packs/{pack_id}/sops/{process_type}` decide it.
+              required: [intake, procedures_text, rule_values, procedures_structure, controls,
+                agent_configuration, evaluations, example_cases]
+              properties:
+                intake: {type: boolean, description: '`source`, `fields`, `case_document_check`, `sap_service`.'}
+                procedures_text: {type: boolean, description: 'SOP text, the general instructions, the
+                    name and the description.'}
+                rule_values: {type: boolean, description: 'The values of the pack''s declared rules;
+                    false when it declares none.'}
+                procedures_structure: {type: boolean, description: '`process_type_to_sop`, `shared_sops`,
+                    `dispositions`.'}
+                controls: {type: boolean, description: '`entitlement`, `write_guards`, `verifier`.'}
+                agent_configuration: {type: boolean, description: '`model_tier`, `max_turns`,
+                    `gateway_tools`.'}
+                evaluations: {type: boolean, description: '`seed`, the test data recipe.'}
+                example_cases: {type: boolean, description: 'The example cases (`evals.json`),
+                    through `PUT`/`DELETE /packs/{pack_id}/evaluations/{test_id}`: content, so the
+                    pack''s author grant.'}
+            lower_limits:
+              type: boolean
+              description: '`PUT /packs/{pack_id}/controls` with a write limit; false when the pack declares none.'
+            set_trigger_mode:
+              type: boolean
+              description: '`PUT /deployment/trigger-mode` or `PUT /packs/{pack_id}/trigger-mode`.'
+            approve:
+              type: boolean
+            process:
+              type: boolean
+              description: 'Process one of this pack''s cases (`POST /runs` with `intent` `process`)
+                or queue it (`POST /cases/enqueue`): `business-operations-case-workers`, then the
+                pack''s `process_groups`. Asking about one needs only `see`.'
+            rehearse:
+              type: boolean
+        sap_system:
+          type: object
+          nullable: true
+          description: 'The SAP system the pack reads from and writes to, by the poller''s rule (its
+            `sap_system`, or the only system this use case reaches), with its
+            `layers.sap.systems.<s>.system_role`. Null when it names a system this use case does not
+            reach, or names none and there are several.'
+          required: [name, system_role]
+          properties:
+            name: {type: string}
+            system_role:
+              type: string
+              enum: [sandbox, development, quality, production]
+        marked:
+          type: boolean
+          description: Its `source` still carries a survey marker, so nothing polls it and no case
+            routes to it. The registry decides this once; a reader never scans for the marker.
+        source:
+          type: object
+          description: Where the cases come from. All three are empty for a pack with no source, which
+            is legitimate — nothing polls or pushes for it.
+          properties:
+            kind:
+              type: string
+              description: 'What makes a record an exception, and so which executor produces it: `filter`,
+                `absence`, `aging`, or `event` for a pushed one.'
+            service:
+              type: string
+              description: The SAP OData service
+              if any.: null
+            entity:
+              type: string
+              description: The entity set within it.
+        fields:
+          type: array
+          description: This pack's own case attributes, in declaration order — which is the column order
+            a case table should render.
+          items:
+            type: object
+            required:
+            - attribute
+            - label
+            - type
+            - sap_field
+            properties:
+              attribute:
+                type: string
+                description: The key inside a case's `attributes` map.
+              label:
+                type: string
+                description: The column heading.
+              type:
+                type: string
+                enum:
+                - string
+                - date
+                - amount
+                - decimal
+                description: What picks the renderer.
+              sap_field:
+                type: string
+                description: The SAP path this was read from. Blank for an attribute the poller derives
+                  rather than reads, which is the honest answer rather than a guess.
+              currency_field:
+                type: string
+                description: 'Present only on an `amount`: the attribute holding the currency to render
+                  it in. A figure without its currency is a number, not money.'
+              role:
+                type: string
+                enum:
+                - reason
+                description: 'What this attribute means beyond its label, where no label or type can say
+                  it. Only `reason` is defined: the field holding why the case is an exception, which
+                  a digest quotes per row. At most one field per pack carries it; a pack that declares
+                  none falls back to `process_type`.'
+              panel:
+                type: boolean
+                description: Present, and false, when this field should stay out of the detail panel.

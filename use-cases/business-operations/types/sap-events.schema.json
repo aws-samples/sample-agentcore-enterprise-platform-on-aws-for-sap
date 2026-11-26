@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SapEventEnvelope",
+  "description": "The body SAP POSTs to /erp-events when it publishes exceptions itself, instead of waiting for the OData poller to find them. Checked by hand in pipeline/erp_events.py (`envelope_error`); a drift test keeps the two agreeing. No twin is generated.\n\nThis file is also the interface contract handed to whoever writes the ABAP. It deliberately says nothing about the per-pack record shape: the field names inside `records[]` are fixed by the `source.field_map` paths in packs/<pack_id>/pack.json, which is the other half of the contract.",
+  "type": "object",
+  "required": [
+    "pack_id",
+    "timestamp",
+    "records"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        1
+      ],
+      "description": "Absent means 1; any other value is refused. A breaking change is a version 2 beside this one, never an edit of it. Accepted on the ingest queue (pipeline/sap_ingest.py); POST /erp-events still refuses it."
+    },
+    "system": {
+      "type": "string",
+      "description": "Optional, and only checked: on the ingest queue it must be the queue's own system. POST /erp-events still refuses it."
+    },
+    "pack_id": {
+      "type": "string",
+      "description": "Which use case pack this batch belongs to. MUST name a pack under packs/ that declares a `source` block — the handler rejects anything else with 400, because the config is what tells it how to map the records. Same value as the ABAP publisher registry's pack column."
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO 8601 UTC instant at which SAP built this batch, e.g. 2026-08-27T01:04:22Z. Not the document's posting time, and not checked against server time: no signature covers it, and the conditional case write already makes a resend harmless."
+    },
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "One row of the pack's CDS exception view, serialized as-is. Keys are matched case-insensitively, so the uppercase component names an ABAP structure serializes to (SUPPLIERINVOICE) resolve against the config's OData-cased paths (SupplierInvoice). Child/item rows nest under the navigation property named by the config's `iterate.path`."
+      },
+      "description": "The exceptions being published. Capped at 100 per call: the publisher's flush() splits a larger batch across calls, which keeps any single request well inside API Gateway's 10 MB body limit."
+    }
+  }
+}

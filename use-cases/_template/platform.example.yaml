@@ -1,0 +1,9 @@
+# {{name}}: its entries for platform.yaml. Merge each top-level key into the file that
+# `deploy.sh design` wrote; `deploy.sh usecase new` already added the use_cases entry.
+# tests/ synthesizes the stack from this file, so it stays a working example.
+
+use_cases:
+  # The operator sets these, from the keys this use case documents (walkthrough.md,
+  # "Configuration"). The scaffold reads one optional key.
+  {{name}}:
+    label: {{name}}

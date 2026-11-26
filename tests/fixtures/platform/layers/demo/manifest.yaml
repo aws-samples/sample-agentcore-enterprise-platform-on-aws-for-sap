@@ -1,0 +1,8 @@
+# A layer for tests/test_layers.py: one stack, one parameter, and an output to leak.
+name: demo
+owner: tests
+summary: Test layer.
+requires: [gateway]
+stacks: [layer-demo]
+public_outputs: [Leak]
+use_case_maps: [grants]   # tests/test_use_cases.py: a use case named here must be installed

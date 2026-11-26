@@ -1,0 +1,125 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>SAP write gates</title>
+<link rel="stylesheet" href="diagram.css">
+<style>body { --w: 1640px; } .hops { --cols: 6; --gap: 100px; }</style>
+
+<p class="kicker">SAP exception handling</p>
+<h1>SAP write gates <em>— run start and write approval</em></h1>
+
+<div id="canvas">
+  <svg id="wires"></svg>
+
+  <div class="phases hops">
+    <div class="phase">Found</div>
+    <div class="phase emph">Trigger mode</div>
+    <div class="phase">Queued</div>
+    <div class="phase core">Run</div>
+    <div class="phase emph">Amount</div>
+    <div class="phase">Written</div>
+  </div>
+
+  <div class="hops">
+    <div class="tile" id="found">
+      <img src="icons/lambda.svg" alt="">
+      <div class="lab">New case</div><div class="sub">poller, push or ingest queue</div>
+    </div>
+    <div class="tile gate" id="autonomy">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <rect x="2.8" y="7.4" width="18.4" height="9.2" rx="4.6"/><circle cx="16.6" cy="12" r="2.8"/></svg>
+      <div class="lab">Two trigger modes</div><div class="sub">the deployment and the pack, both <code>auto</code> (default <code>manual</code>)</div>
+    </div>
+    <div class="tile" id="queue">
+      <img src="icons/sqs.svg" alt="">
+      <div class="lab">Agent queue</div><div class="sub">SQS FIFO, one group per case</div>
+    </div>
+    <div class="tile core" id="run">
+      <img src="icons/agentcore.svg" alt="">
+      <div class="lab">Agent run</div><div class="sub">the invoker writes its run grant first</div>
+    </div>
+    <div class="tile gate" id="amount">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <path d="M12 2.6l7.6 3v6.1c0 4.6-3.2 8.2-7.6 9.7-4.4-1.5-7.6-5.1-7.6-9.7V5.6z"/>
+        <path d="M12 7.6v8.8"/><path d="M14.4 9.4c-.5-.8-1.4-1.2-2.4-1.2-1.4 0-2.4.7-2.4 1.8 0 2.4 4.8 1.4 4.8 4 0 1.1-1 1.8-2.4 1.8-1.1 0-2-.5-2.5-1.3"/></svg>
+      <div class="lab">Amount gate</div><div class="sub">the run checks, against <code>AUTO_WRITE_LIMIT_USD</code></div>
+    </div>
+    <div class="tile loose" id="write">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <ellipse cx="12" cy="5.4" rx="7.8" ry="2.9"/>
+        <path d="M4.2 5.4v13.2c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9V5.4"/>
+        <path d="M4.2 12c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9"/></svg>
+      <div class="lab">SAP write</div><div class="sub">the case's own document only</div>
+    </div>
+  </div>
+
+  <div class="hops band">
+    <div class="tile" id="detected" style="grid-column: 2">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <circle cx="12" cy="12" r="8.6"/><path d="M12 7.2V12l3.4 2.1"/></svg>
+      <div class="lab">Stays <code>detected</code></div><div class="sub">nothing queued; the hourly sweep queues nothing either</div>
+    </div>
+    <div class="tile gate" id="approver" style="grid-column: 5">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.6c0-4 3.2-6.4 7.2-6.4s7.2 2.4 7.2 6.4"/></svg>
+      <div class="lab">An approver decides</div><div class="sub">on the ticket the agent raised</div>
+    </div>
+  </div>
+
+  <div class="hops band">
+    <div class="rowlab" style="grid-column: 1 / 4">Manual start <em>— in either mode, unless an emergency stop stands</em></div>
+    <div class="tile" id="operator" style="grid-column: 1">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.6c0-4 3.2-6.4 7.2-6.4s7.2 2.4 7.2 6.4"/></svg>
+      <div class="lab">Case worker starts a case</div><div class="sub"><b>Process</b> in the console</div>
+    </div>
+    <div class="tile gate" id="entitled" style="grid-column: 2">
+      <img src="icons/apigw.svg" alt="">
+      <div class="lab">Case workers only</div><div class="sub"><code>business-operations-case-workers</code>, narrowed by <code>process_groups</code></div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="card">
+    <div class="lab">Unattended runs</div>
+    <ul>
+      <li>Only when both trigger modes read <code>auto</code>; both start <code>manual</code>, since a fresh deploy would otherwise queue every open exception SAP shows it.</li>
+      <li>Admins set the deployment's on <b>Deployment settings</b>, <code>PUT /deployment/trigger-mode</code> or <code>ops.py trigger-mode set auto</code>, and a pack's on its Overview, <code>PUT /packs/{pack_id}/trigger-mode</code> or <code>--pack</code>.</li>
+      <li>The trigger modes apply to new work only: a run under way finishes, and a person's reply is queued in either mode.</li>
+      <li>The <b>Emergency stop</b> (<code>POST /deployment/stop</code>) stops every run in progress, refuses every start and resume, and keeps both trigger modes at <code>manual</code> until an admin clears it. Both need a reason.</li>
+    </ul>
+  </div>
+  <div class="card gate">
+    <div class="lab">Amount gate inputs</div>
+    <ul>
+      <li>The case's amount, in USD, against its pack's limit; a pack that declares no limit has none. No readable amount, or another currency, is refused.</li>
+      <li>A case made from pushed records never writes on its own amount.</li>
+      <li>Above the limit, the only write that passes is the one the approver approved. A pack with no <code>approve_groups</code> lets anyone who can see it approve.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="legend">
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 10% 55%)" stroke-width="1.5"/></svg><b>Unattended path</b></span>
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 12% 72%)" stroke-width="1.5" stroke-dasharray="6 5"/></svg>Waits for a person</span>
+  <span>Amber = a gate</span>
+  <span>Dashed border = SAP</span>
+</div>
+
+<script>
+const EDGES = [
+  ["found",    "autonomy", "h",   0,  "a case is created",      "",     1],
+  ["autonomy", "queue",    "h",   0,  "both auto",              "",     2],
+  ["queue",    "run",      "h",   0,  "the invoker reads it",      "",     3],
+  ["run",      "amount",   "h",   0,  "an SAP write",            "",     4],
+  ["amount",   "write",    "h",   0,  "within the limit",       "",     5],
+  ["autonomy", "detected", "v",   0,  "either manual",          "dash", 2],
+  ["amount",   "approver", "v",  -16, "over: ask for approval", "dash", 5],
+  ["approver", "amount",   "vup", 16, "the run resumes with that write", "dash", 6],
+  ["operator", "entitled", "h",   0,  "start",                  "",     1],
+  ["entitled", "run",      "hru", 0,  "POST /runs",             "",     2],
+];
+</script>
+<script src="diagram.js"></script>

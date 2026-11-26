@@ -1,0 +1,57 @@
+# The manifest is the only file the platform reads about this use case.
+name: business-operations
+owner: business-operations-maintainers   # who reviews changes to this folder
+summary: Business process agents for SAP exception handling, on the shared platform's Gateway, Cedar engine and interceptor.
+# The docs/PLATFORM_INTERFACE.md version this use case is written against; a mismatch fails the synth.
+platform_interface: 3
+# What stack.py reads: auth/user-pool-id (its groups; brokered mode only), gateway/* (its targets,
+# the Gateway role grant, its Cedar statements) and ops-topic/arn
+# (the notification-channel alarm). The clients below need auth and gateway. The
+# runtime keeps its short-term history in the platform's Memory. SAP comes from the
+# SAP layer (layers/sap/): its runtimes and targets, under this use case's claim.
+requires: [auth, gateway, memory, ops-topic, layer-sap]
+# The notification-channel alarm publishes to the platform's ops topic.
+alarm_topic: true
+# -sap holds this use case's SAP claim and its Cedar permits on the SAP targets.
+stacks: [uc-business-operations-console, uc-business-operations, uc-business-operations-knowledge, uc-business-operations-sap, uc-business-operations-runtime]
+entry: stack.py
+# Created by the platform on its user pool and admitted to the shared Gateway.
+# Scopes become uc-business-operations/<scope>; Cedar keys on them. Under
+# identity.mode direct they are Entra apps named in identity.use_case_clients,
+# and Cedar keys on their azp (docs/direct-mode.md).
+gateway_clients:
+  - name: reader
+    scopes: [read]
+  - name: writer
+    scopes: [read, write]
+# Printed in the deploy summary. SampleTicketing says the ticketing API is a stand-in
+# to replace before production.
+public_outputs: [ConsoleUrl, ApiUrl, SampleTicketing]
+# The pages the platform's entry docs list for this use case (scripts/gen_use_case_index.py).
+docs:
+  title: SAP exception handling
+  entry: README.md
+  enable: walkthrough.md#enable
+  quickstart: docs/quickstart.md
+  glossary: docs/glossary.md
+  roles: docs/roles.md
+  faq: docs/faq.md
+  remove: docs/operating/removal.md#use-case-removal
+  pages:
+    - {title: Overview, path: README.md}
+    - {title: Quickstart, path: docs/quickstart.md}
+    - {title: Walkthrough, path: walkthrough.md}
+    - {title: The operator console, path: docs/console.md}
+    - {title: Case lifecycle, path: docs/lifecycle.md}
+    - {title: Process owner guide, path: docs/for-process-owners.md}
+    - {title: Packs and SOPs, path: docs/packs.md}
+    - {title: Security, path: docs/security.md}
+    - {title: Controls and evidence, path: docs/controls-and-evidence.md}
+    - {title: Operations, path: docs/operating.md}
+    - {title: Configuration, path: docs/configuration.md}
+    - {title: Architecture, path: docs/architecture.md}
+    - {title: Production checklist, path: docs/production-checklist.md}
+    - {title: Glossary, path: docs/glossary.md}
+    - {title: Roles, path: docs/roles.md}
+    - {title: FAQ, path: docs/faq.md}
+    - {title: Skills, path: skills/README.md}

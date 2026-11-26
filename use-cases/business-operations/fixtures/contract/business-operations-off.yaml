@@ -1,0 +1,16 @@
+# Parity fixture: business-operations.yaml with the use case removed and nothing else
+# changed, so check-contract.sh proves the platform still synthesizes with the
+# use case turned off (AGENTS.md tenancy rule 1). Its interceptor check stays
+# listed, as it would in a platform.yaml someone only took the use case out of.
+project: agentcore-workshop
+environment: dev
+
+gateway:
+  interceptor_extensions:
+    - path: use-cases/business-operations/business_operations_check
+      target_prefixes: [business-operations-]
+      request_headers: true
+
+security:
+  cedar:
+    enabled: true

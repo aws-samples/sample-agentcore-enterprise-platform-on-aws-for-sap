@@ -1,0 +1,15 @@
+# hello-sap: its entries for platform.yaml. Merge each top-level key into the file that
+# `deploy.sh design` wrote; `deploy.sh usecase new` already added the use_cases entry.
+# The SAP layer's own block (its systems and its check under gateway.interceptor_extensions)
+# is the operator's, once per deployment: layers/sap/walkthrough.md. tests/ synthesizes
+# the stack from this file over one sandbox system, so it stays a working example.
+
+use_cases:
+  hello-sap: {}           # the use case's own settings; stack.py reads none yet
+
+layers:
+  sap:
+    access:
+      # The operator sets this row: the most SAP access hello-sap may have. Its claim
+      # (stack.py) may use less, never more. Read-only: name no write here.
+      hello-sap: {read: "*"}

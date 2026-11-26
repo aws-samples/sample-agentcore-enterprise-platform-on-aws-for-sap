@@ -1,0 +1,11 @@
+# Parity fixture: the people Gateway on. check-contract.sh synthesizes this like a
+# preset, proving gateway.people adds exactly the people-gateway stack.
+project: agentcore-workshop
+environment: dev
+
+gateway:
+  people:
+    enabled: true
+    remote_clients:
+      - name: quick
+        regions: [us-east-1]

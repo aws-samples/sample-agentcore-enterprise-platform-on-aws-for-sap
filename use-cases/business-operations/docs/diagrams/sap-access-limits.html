@@ -1,0 +1,71 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>SAP access limits</title>
+<link rel="stylesheet" href="diagram.css">
+<style>
+  body { --w: 1180px; }
+  .lim { border: 1.5px solid var(--panel-bd); border-radius: 10px; padding: 12px 16px 16px; background: #fff; }
+  .lim > .head { display: grid; grid-template-columns: 1fr auto; column-gap: 24px; margin-bottom: 10px; }
+  .lim .name { font-size: 14px; font-weight: 640; letter-spacing: -0.01em; }
+  .lim .who { font-size: 11px; font-weight: 600; color: var(--muted); text-align: right; }
+  .lim .who code { font-family: var(--mono); font-size: 10px; color: var(--subtle); font-weight: 500; }
+  .lim .what { grid-column: 1 / -1; font-size: 11px; line-height: 1.45; color: var(--subtle); margin-top: 3px; }
+  .lim .what code { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .l1 { border-color: hsl(220 12% 70%); }
+  .l2 { border-color: hsl(210 70% 62%); background: hsl(210 80% 98.5%); }
+  .l2 > .head .name { color: hsl(210 70% 36%); }
+  .l3 { border-color: var(--core-bd); background: var(--core-bg); }
+  .l3 > .head .name { color: var(--core-fg); }
+  .l4 { border-color: var(--amber-bd); background: var(--amber-bg); }
+  .l4 > .head .name { color: var(--amber-fg); }
+  .l5 { border-style: dashed; border-color: hsl(220 12% 60%); background: hsl(220 14% 97%); margin-bottom: -2px; }
+  .call { font-size: 11px; color: var(--muted); text-align: center; padding: 8px 0 0; }
+</style>
+
+<p class="kicker">SAP exception handling</p>
+<h1>SAP access limits</h1>
+
+<div class="lim l1">
+  <div class="head">
+    <div class="name">Access row</div>
+    <div class="who">Operator · <code>layers.sap.access</code> in <code>platform.yaml</code></div>
+    <div class="what">The upper limit for the use case: which SAP systems it may read and write through the Gateway, and which systems its own functions call directly.</div>
+  </div>
+  <div class="lim l2">
+    <div class="head">
+      <div class="name">SAP access claim</div>
+      <div class="who">Use case author · the use case's code</div>
+      <div class="what">The app clients, systems and writes the use case says it uses. It must fit inside the access row. The SAP layer refuses every SAP call that no claim covers, and every delete.</div>
+    </div>
+    <div class="lim l3">
+      <div class="head">
+        <div class="name">Cedar permit</div>
+        <div class="who">Security engineer · <code>security.cedar</code></div>
+        <div class="what">Which app client may call which tool: the reader client reads, the writer client writes. Cedar refuses a call only in <code>ENFORCE</code> mode.</div>
+      </div>
+      <div class="lim l4">
+        <div class="head">
+          <div class="name">Run checks</div>
+          <div class="who">Pack admin · the pack's controls</div>
+          <div class="what">A live run grant, a write only to the case's own document (the case document check), and a write over the limit only after a person approves it.</div>
+        </div>
+        <div class="lim l5">
+          <div class="head">
+            <div class="name">SAP authorizations</div>
+            <div class="who">SAP Basis · the roles of the SAP user</div>
+            <div class="what">SAP checks the roles of the user the server signs in as: the system's service account, or with the <code>obo</code> flow, the person who started the run.</div>
+          </div>
+          <div class="call">A SAP call goes through only when every box allows it.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="legend">
+  <span>Outer box = wider limit</span>
+  <span>Each box can only narrow the box around it</span>
+  <span>Dashed border = SAP</span>
+</div>

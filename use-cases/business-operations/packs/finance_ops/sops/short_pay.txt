@@ -1,0 +1,240 @@
+SHORT PAY / DEDUCTION DISPUTE — INVOICE EXCEPTION RESOLUTION
+STANDARD OPERATING PROCEDURE (SOP)
+Version 1.1
+
+================================================================================
+PURPOSE
+================================================================================
+
+This SOP defines how the agent acts on a decision to pay a supplier invoice for
+less than it bills — a SHORT PAY. It is entered only from another SOP's approval
+branch, once an over-billing has been established, quantified, and answered by an
+approver. It does not classify anything and it does not compute a variance.
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in RFC 2119.
+
+WHAT THIS PACK CAN AND CANNOT EXECUTE — read before STEP 3.
+API_SUPPLIERINVOICE_PROCESS_SRV exposes three writes: Release, Post and Cancel.
+It exposes nothing that posts a partial payment, a debit memo, a credit-memo
+request, or a residual payment block, and InvoiceGrossAmount is not writable on a
+document that is already posted. So a short pay here is executed by CANCELLING
+the blocked invoice with a documented reversal reason and asking the supplier to
+reissue for the supported amount. The agent MUST NOT report that it paid part of
+an invoice, reduced an invoice, or raised a deduction document — none of those
+writes exist on this service. Posting the deduction itself is the AP clerk's
+step, and STEP 4 is what hands it to them.
+
+================================================================================
+SCOPE
+================================================================================
+
+Process Type: short_pay
+SAP Modules:  MM (Materials Management), FI-AP (Accounts Payable)
+SAP Service:  API_SUPPLIERINVOICE_PROCESS_SRV
+Entities:     A_SupplierInvoice, A_SuplrInvcItemPurOrdRef
+
+Entered from: quantity_variance STEP 3.3, price_variance STEP 3.3 — the
+over-billing branches, when the approver answers "short pay" rather than
+"approve in full".
+
+================================================================================
+PRECONDITIONS
+================================================================================
+
+Before execution, the following MUST be true:
+
+1. The SAP MCP Server is reachable for reads and function imports.
+2. The case payload contains the supplier invoice number and fiscal year.
+3. The referring SOP has recorded, in case state: the disputed amount, its
+   currency, the reason it is disputed, and the approver's answer.
+4. The agent MUST NOT treat an earlier run of this case as a source of fact.
+   Conversation history from earlier runs of the same case MAY be restored (it
+   is kept for 30 days), but tool results are not, so every value the agent
+   compares or writes MUST be read from SAP in this run.
+
+================================================================================
+STEP 1: GATHER DATA
+================================================================================
+
+1.1  The agent MUST read from case state the disputed amount, its currency, the
+     dispute reason, and the approver's answer, all as the referring SOP recorded
+     them. The agent MUST NOT recompute the variance here; a second computation
+     against freshly read documents can disagree with the figure the approver
+     actually approved.
+1.2  The agent MUST retrieve the invoice header (A_SupplierInvoice), including
+     its PostingDate, and confirm that SupplierInvoiceStatus and
+     PaymentBlockingReason still show the invoice as blocked and not yet paid.
+1.3  The agent MUST retrieve the invoice items (A_SuplrInvcItemPurOrdRef) to
+     record which line carries the deduction.
+
+================================================================================
+STEP 2: DECIDE
+================================================================================
+
+2.1  The agent MUST NOT enter this SOP on its own classification. IF case state
+     carries no approver answer, the agent MUST raise an approval ticket to
+     {{CONTACT_PROCUREMENT}} offering both answers (approve as billed, or short
+     pay), MUST state in the case notes that a short pay was considered without
+     an approval on record, MUST update case state to "awaiting_human_input",
+     and STOP.
+
+2.2  IF the approver answered "approve in full", this SOP does not apply. The
+     agent MUST return to the referring SOP's STEP 4 and release the invoice as
+     billed.
+
+2.3  IF the approver answered "short pay", the deduction is the disputed amount
+     the referring SOP recorded, in the currency it recorded. The agent MUST NOT
+     round it, convert it, or substitute a figure of its own.
+
+2.4  IF the invoice is no longer blocked — already released, already paid, or
+     already cancelled — the agent MUST NOT write. It MUST notify
+     {{CONTACT_AP_TEAM}} that the invoice moved on since the approval was
+     requested, and STOP. A cancellation of a paid invoice is a different
+     accounting event from the one that was approved.
+
+2.5  IF the invoice's InvoiceGrossAmount exceeds ${{AUTO_WRITE_LIMIT_USD}} and
+     this run carries no approved decision on the Cancel itself, the agent MUST
+     NOT write. The approval of the deduction does not raise this pack's
+     unattended write ceiling. The agent MUST raise an approval ticket to
+     {{CONTACT_AP_TEAM}} for the Cancel, with everything STEP 4 would send and
+     the proposed write, MUST update case state to "awaiting_human_input", and
+     STOP. Approve on this ticket means "execute the Cancel in STEP 3". It does
+     NOT change the short-pay answer already recorded, and the agent MUST NOT
+     read it as "approve as billed" under clause 2.2. IF approved, the agent
+     MUST continue at STEP 3; IF denied, the agent MUST set the case to
+     "manual_review_required".
+
+2.6  IF the disputed amount is equal to or greater than InvoiceGrossAmount, this
+     is a full rejection rather than a deduction. The execution in STEP 3 is
+     identical; the notification in STEP 4 MUST say "rejected in full" and MUST
+     NOT state a supported amount.
+
+================================================================================
+STEP 3: EXECUTE RESOLUTION
+================================================================================
+
+3.1  The agent MUST cancel the blocked invoice with the Cancel function import,
+     passing SupplierInvoice, FiscalYear, PostingDate, and ReversalReason.
+
+3.1a PostingDate MUST be the original invoice's own PostingDate, as read in
+     STEP 1.2, and MUST NOT be today's date. Today's date falls in whatever
+     period is current, and that period is not necessarily open for posting;
+     the original's period was open when it posted.
+
+3.1b PostingDate is an Edm.DateTime parameter, so the agent MUST pass it as the
+     OData V2 URI literal `datetime'YYYY-MM-DDT00:00:00'`, for example
+     `datetime'2025-01-31T00:00:00'`. The `/Date(milliseconds)/` form is the
+     JSON body format; quoted or unquoted, SAP rejects it as a function import
+     parameter.
+
+3.2  ReversalReason MUST be the reason code the operator configured for AP
+     reversals. Where the case carries none, the agent MUST use "01", which is
+     SAP standard, and MUST name the code it used in the case notes so the
+     choice is visible rather than assumed. SAP's label for "01" is "reversal
+     in current period"; that label names the reason and does not set the
+     PostingDate, which clause 3.1a does. The agent MUST NOT invent a code
+     outside the system's configured set; a Cancel with an unconfigured reason
+     fails, and a Cancel with the wrong one posts to the wrong period.
+
+3.3  The agent MUST NOT use odata_delete, and MUST NOT attempt to reduce the
+     invoice with odata_update against InvoiceGrossAmount or
+     SupplierInvoiceItemAmount. Neither field is writable on a posted document:
+     the call fails, and a failed call is not a short pay.
+
+3.4  The agent MUST update case state after the write, recording the reversal
+     document, the deducted amount and currency, and the reason code used.
+
+3.5  The agent MUST NOT retry a Cancel that may have succeeded, because a second
+     reversal is a second accounting document. A Cancel may have succeeded
+     whenever SAP did not answer with an HTTP 4xx error: a timeout, a 5xx, or
+     a response the agent cannot read.
+
+3.6  IF SAP answers the Cancel with an HTTP 4xx error whose message names a
+     fault in an input — a malformed or wrongly typed parameter literal, or a
+     posting period that is not open — nothing was posted, and the agent MAY
+     retry the Cancel exactly ONCE with that input corrected. For a period that
+     is not open, the corrected PostingDate is the first day of the most
+     recent open period the message lists. The agent MUST record both attempts and
+     both SAP messages in case state.
+
+3.7  IF the Cancel still fails after that one retry, or fails in any other way,
+     the agent MUST NOT attempt it again. It MUST raise a free-text ticket to
+     {{CONTACT_AP_TEAM}} asking them to perform the reversal in SAP and reply
+     with the reversal document number, MUST include the invoice number,
+     fiscal year, the parameters sent and each SAP message verbatim, MUST
+     update case state to "awaiting_human_input", and STOP. When AP replies
+     with a reversal document, the agent MUST continue at clause 3.4 with that
+     document.
+
+================================================================================
+STEP 4: HAND THE DEDUCTION TO AP
+================================================================================
+
+4.1  The agent MUST send a notification to {{CONTACT_AP_TEAM}} stating, in this
+     order: invoice number and fiscal year, PO number and line, the invoicing
+     party, the amount the purchase order and goods receipt support, the deducted
+     amount with its currency, the dispute reason in one sentence, the reversal
+     document from STEP 3, the approver who authorised the deduction, and the
+     {{SHORT_PAY_DISPUTE_WINDOW_DAYS}}-day window the supplier has to dispute it.
+
+4.2  The agent MUST NOT notify the invoicing party directly. The Gateway's
+     send_notification permit restricts recipients to the operator's configured
+     domains, so a supplier address is refused; telling the supplier is AP's
+     step, and 4.1 is what gives them the text to send.
+
+4.3  The agent MUST NOT state or imply that the supplier has been told, that a
+     reduced payment has been made, or that a credit has been posted. What
+     happened is a cancellation and a request; that is what the notification
+     MUST say.
+
+================================================================================
+STEP 5: CLOSE CASE
+================================================================================
+
+5.1  The agent MUST update case status to 'complete' once the cancellation is
+     confirmed and STEP 4 has been sent.
+5.2  The case notes MUST record the deducted amount, the reversal document, the
+     reason code, and that the supplier is expected to reissue. A case closed
+     here is NOT a paid invoice, and the notes MUST NOT read as one.
+
+================================================================================
+ESCALATION RULES
+================================================================================
+
+| Trigger                              | Action                               |
+|--------------------------------------|--------------------------------------|
+| No approver answer on record         | Approval ticket, wait (2.1)          |
+| Invoice no longer blocked            | Notify {{CONTACT_AP_TEAM}}, STOP     |
+| Invoice above the auto-write limit   | Approval ticket, {{CONTACT_AP_TEAM}} |
+| Cancel 4xx naming an input fault     | One corrected retry (3.6)            |
+| Cancel fails again, or otherwise     | Ticket to {{CONTACT_AP_TEAM}} (3.7)  |
+
+================================================================================
+CONTACTS
+================================================================================
+
+- AP Team:     {{CONTACT_AP_TEAM}}
+- Procurement: {{CONTACT_PROCUREMENT}}
+
+================================================================================
+TOLERANCES (CONFIGURABLE — DECLARED IN packs/finance_ops/pack.json)
+================================================================================
+
+| Parameter                          | Symbol                             |
+|------------------------------------|------------------------------------|
+| Supplier dispute window (days)     | {{SHORT_PAY_DISPUTE_WINDOW_DAYS}}  |
+| Unattended write ceiling (USD)     | {{AUTO_WRITE_LIMIT_USD}}           |
+
+This SOP declares no tolerance of its own. It never decides whether an amount is
+material — the referring SOP did that, and the approver answered it.
+
+================================================================================
+REVISION HISTORY
+================================================================================
+
+| Version | Date | Author | Changes |
+|---|---|---|---|
+| 1.0 | 2026-09-11 | Pack author | Initial SOP: short pay executed as Cancel |
+| 1.1 | 2026-10-23 | Pack author | Approval tickets (2.1, 2.5); reversal on the original's PostingDate as a datetime literal (3.1a, 3.1b); one corrected retry, then a ticket (3.5-3.7) |

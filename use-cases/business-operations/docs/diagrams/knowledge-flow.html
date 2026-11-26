@@ -1,0 +1,99 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>SOP and knowledge flow</title>
+<link rel="stylesheet" href="diagram.css">
+<style>
+  body { --w: 1640px; } .hops { --cols: 6; --gap: 100px; }
+  .matrix { row-gap: 30px; }
+  #agent { align-self: stretch; display: flex; flex-direction: column; justify-content: center; }
+</style>
+
+<p class="kicker">SAP exception handling</p>
+<h1>SOP and knowledge flow <em>— SOPs in S3, read whole or searched</em></h1>
+
+<div id="canvas">
+  <svg id="wires"></svg>
+
+  <div class="phases hops">
+    <div class="phase">Written</div>
+    <div class="phase">Stored</div>
+    <div class="phase" style="grid-column: 3 / 5">Indexed for search</div>
+    <div class="phase">Served</div>
+    <div class="phase core">Used</div>
+  </div>
+
+  <div class="hops matrix">
+    <div class="tile" id="sopread" style="grid-row: 1; grid-column: 5">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <path d="M5 2.8h9.4L19 7.4v13.8H5z"/><path d="M14.4 2.8v4.6H19"/>
+        <path d="M8.4 15.4l2.2 2.2 4.4-4.8"/></svg>
+      <div class="lab">Full SOP for the case</div><div class="sub">at run start, and from <code>load_sop</code> mid-run</div>
+    </div>
+
+    <div class="tile" id="author" style="grid-row: 2; grid-column: 1">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.6c0-4 3.2-6.4 7.2-6.4s7.2 2.4 7.2 6.4"/></svg>
+      <div class="lab">A pack author</div><div class="sub">Packs screen, MCP authoring, or a bundle import</div>
+    </div>
+    <div class="tile" id="bucket" style="grid-row: 2; grid-column: 2">
+      <img src="icons/s3.svg" alt="">
+      <div class="lab">SOP bucket</div><div class="sub">S3, every version kept; a sidecar names each SOP's pack</div>
+    </div>
+    <div class="tile" id="kb" style="grid-row: 2; grid-column: 3">
+      <img src="icons/kb.svg" alt="">
+      <div class="lab">Amazon Bedrock knowledge base</div><div class="sub">ingests on every SOP write, a deploy, or <code>kb-sync</code></div>
+    </div>
+    <div class="tile" id="vectors" style="grid-row: 2; grid-column: 4">
+      <img src="icons/s3.svg" alt="">
+      <div class="lab">S3 Vectors index</div><div class="sub">one vector per SOP, with its <code>pack_id</code></div>
+    </div>
+    <div class="tile" id="search" style="grid-row: 2; grid-column: 5">
+      <img src="icons/lambda.svg" alt="">
+      <div class="lab"><code>search_sap_sops</code></div><div class="sub">a Gateway tool, scoped to the run's pack</div>
+    </div>
+
+    <div class="tile core" id="agent" style="grid-row: 1 / 3; grid-column: 6">
+      <img src="icons/agentcore.svg" alt="">
+      <div class="lab">Agent run</div><div class="sub">follows the SOP; searches where the pack offers the tool</div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="card">
+    <div class="lab">SOP retrieval paths</div>
+    <ul>
+      <li>The case's SOP comes whole, with its tolerances and contacts filled in, and names the S3 version it read.</li>
+      <li>Search finds a SOP the agent was not handed. Each hit is a whole SOP, filled in the same way.</li>
+      <li>No one may delete a version, so a run's evidence names the exact text it followed.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="lab">Configuration</div>
+    <ul>
+      <li><code>load_sop</code> reads the bucket, not the knowledge base, so it works with search off.</li>
+      <li><code>knowledge.sop_search</code> (on by default) adds the knowledge base and <code>search_sap_sops</code>.</li>
+      <li>The bucket's policy lets only the <code>/sops</code> route and the pack composer write SOPs.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="legend">
+  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="hsl(220 10% 55%)" stroke-width="1.5"/></svg><b>A SOP's text</b></span>
+  <span>Purple = the agent</span>
+</div>
+
+<script>
+const EDGES = [
+  ["author",  "bucket",  "h",    0, "a SOP write",           "", 1],
+  ["bucket",  "sopread", "ur",   0, "by process type",       "", 2],
+  ["bucket",  "kb",      "h",    0, "ingestion job",         "", 2],
+  ["kb",      "vectors", "h",    0, "embeddings",            "", 3],
+  ["vectors", "search",  "h",    0, "query + pack filter",   "", 4],
+  ["sopread", "agent",   "h",    0, "the whole procedure",   "", 3],
+  ["search",  "agent",   "h",    0, "up to two SOPs",        "", 5],
+];
+</script>
+<script src="diagram.js"></script>

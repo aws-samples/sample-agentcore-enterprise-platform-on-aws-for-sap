@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SapNudge",
+  "description": "What a SAP sender puts on its system's ingest queue to say a pack's exception happened: keys, never data. The consumer re-reads the pack's own OData query narrowed to these keys, so a key that is not an exception in SAP makes nothing. Checked by hand in pipeline/sap_ingest.py (`parse`); a drift test keeps the two agreeing. No twin is generated. At most 16 KB. A breaking change is a version 2 beside this one, never an edit of it.",
+  "type": "object",
+  "required": ["pack_id"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Absent means 1. Any other value is refused."
+    },
+    "pack_id": {
+      "type": "string",
+      "description": "A published pack whose `source.push` accepts nudges and whose SAP system is the queue's."
+    },
+    "system": {
+      "type": "string",
+      "description": "Optional, and only checked: it must be the system whose queue the message came through. The queue, not this field, decides the system."
+    },
+    "keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "description": "Absent means: poll this pack now. Each item names exactly the pack's key fields that sit on the entity it queries (`source.key[].field`, parent-scoped; for finance_ops `SupplierInvoice` and `FiscalYear`), with values as SAP holds them, unstripped.",
+      "items": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._/-]{1,40}$"
+        }
+      }
+    }
+  }
+}

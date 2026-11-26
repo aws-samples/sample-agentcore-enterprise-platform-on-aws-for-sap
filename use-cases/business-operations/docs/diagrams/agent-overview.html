@@ -1,0 +1,74 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<meta charset="utf-8">
+<title>Business process agent</title>
+<link rel="stylesheet" href="diagram.css">
+<style>body { --w: 1240px; } .hops { --cols: 4; --gap: 120px; }</style>
+
+<p class="kicker">SAP exception handling</p>
+<h1>Business process agent</h1>
+
+<div id="canvas">
+  <svg id="wires"></svg>
+
+  <div class="hops">
+    <div class="tile loose" id="exception">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <ellipse cx="12" cy="5.4" rx="7.8" ry="2.9"/>
+        <path d="M4.2 5.4v13.2c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9V5.4"/>
+        <path d="M4.2 12c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9"/></svg>
+      <div class="lab">Exception in SAP</div><div class="sub">a blocked supplier invoice</div>
+    </div>
+    <div class="tile" id="case">
+      <img src="icons/dynamodb.svg" alt="">
+      <div class="lab">Case</div><div class="sub">one per SAP document</div>
+    </div>
+    <div class="tile core" id="agent">
+      <img src="icons/agentcore.svg" alt="">
+      <div class="lab">Agent follows the SOP</div><div class="sub">reads the evidence from SAP</div>
+    </div>
+    <div class="tile loose" id="posted">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(220 12% 45%)" stroke-width="1.6">
+        <ellipse cx="12" cy="5.4" rx="7.8" ry="2.9"/>
+        <path d="M4.2 5.4v13.2c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9V5.4"/>
+        <path d="M4.2 12c0 1.6 3.5 2.9 7.8 2.9s7.8-1.3 7.8-2.9"/></svg>
+      <div class="lab">Change posted to SAP</div><div class="sub">the case's own document only</div>
+    </div>
+  </div>
+
+  <div class="hops band">
+    <div class="tile gate" id="approver" style="grid-column: 4">
+      <svg viewBox="0 0 24 24" fill="none" stroke="hsl(28 62% 44%)" stroke-width="1.6">
+        <circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.6c0-4 3.2-6.4 7.2-6.4s7.2 2.4 7.2 6.4"/></svg>
+      <div class="lab">A person approves</div><div class="sub">sees the exact change first</div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="card">
+    <div class="lab">Recorded on every case</div>
+    <ul>
+      <li>Each SAP read, each decision and each approval, with the version of the SOP the agent followed.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="lab">Ask and Process</div>
+    <ul>
+      <li><b>Process</b> (<code>intent: process</code>) starts the run that may write, within the run checks.</li>
+      <li>A question from the ask bar (<code>intent: ask</code>, the default) only reads: the agent has no tool that leaves a mark, and the run checks refuse a write on its grant.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const EDGES = [
+  ["exception", "case",     "h",   0,  "found by poll or event", "",     1],
+  ["case",      "agent",    "h",   0,  "",                        "",     2],
+  ["agent",     "posted",   "h",   0,  "under your limit",        "",     3],
+  ["agent",     "approver", "hvh", 60, "over the limit",          "dash", 3],
+  ["approver",  "posted",   "vup", 0,  "approved",                "dash", 4],
+];
+</script>
+<script src="diagram.js"></script>
